@@ -29,6 +29,12 @@ A declarative React game engine built on [Three.js](https://threejs.org/) and [R
 - Host authority model with automatic host migration
 - Interest management, interpolation, and network simulation tools
 
+## Community
+
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/5ymwfD4hYE)
+
+Ask questions, share what you build, and follow development on **[Discord](https://discord.gg/5ymwfD4hYE)**.
+
 ## Documentation
 
 Full API reference, guides, and examples at **[docs.carverjs.dev](https://docs.carverjs.dev)**.
