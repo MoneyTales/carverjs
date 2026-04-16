@@ -29,6 +29,10 @@ A declarative React game engine built on [Three.js](https://threejs.org/) and [R
 - Host authority model with automatic host migration
 - Interest management, interpolation, and network simulation tools
 
+## Documentation
+
+Full API reference, guides, and examples at **[docs.carverjs.dev](https://docs.carverjs.dev)**.
+
 ## Quick Start
 
 ```bash

@@ -5,7 +5,7 @@ Thanks for your interest in contributing. CarverJS is in early beta and we welco
 ## Getting Started
 
 ```bash
-git clone https://github.com/het-dave/carverjs.git
+git clone https://github.com/MoneyTales/carverjs
 cd carverjs
 pnpm install
 pnpm build
@@ -68,7 +68,7 @@ docs: update getting started guide
 - Performance profiling and optimization
 - Additional signaling strategies (Nostr, Supabase, etc.)
 - More example games
-- Documentation improvements
+- New community requested feature implementation
 - Test coverage
 
 ## License
