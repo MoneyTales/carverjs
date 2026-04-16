@@ -1,0 +1,98 @@
+{
+  "name": "@carverjs/core",
+  "version": "0.0.1",
+  "description": "",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./components": {
+      "types": "./dist/components.d.ts",
+      "import": "./dist/components.mjs",
+      "require": "./dist/components.js"
+    },
+    "./hooks": {
+      "types": "./dist/hooks.d.ts",
+      "import": "./dist/hooks.mjs",
+      "require": "./dist/hooks.js"
+    },
+    "./systems": {
+      "types": "./dist/systems.d.ts",
+      "import": "./dist/systems.mjs",
+      "require": "./dist/systems.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "import": "./dist/store.mjs",
+      "require": "./dist/store.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.mjs",
+      "require": "./dist/types.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "components": [
+        "dist/components.d.ts"
+      ],
+      "hooks": [
+        "dist/hooks.d.ts"
+      ],
+      "systems": [
+        "dist/systems.d.ts"
+      ],
+      "store": [
+        "dist/store.d.ts"
+      ],
+      "types": [
+        "dist/types.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "keywords": [],
+  "author": "Het Dave",
+  "license": "MIT",
+  "dependencies": {
+    "three-stdlib": "^2.36.1"
+  },
+  "peerDependencies": {
+    "@react-three/drei": ">=10.0.0",
+    "@react-three/fiber": ">=9.0.0",
+    "@react-three/rapier": ">=1.0.0",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "three": ">=0.150.0",
+    "zustand": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@react-three/rapier": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@react-three/drei": "^10.7.7",
+    "@react-three/fiber": "^9.5.0",
+    "@react-three/rapier": "^2.2.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.183.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "three": "^0.183.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "zustand": "^5.0.11"
+  }
+}

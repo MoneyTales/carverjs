@@ -1,0 +1,73 @@
+{
+  "name": "@carverjs/multiplayer",
+  "version": "0.0.1",
+  "description": "Multiplayer networking for CarverJS games",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./transport": {
+      "types": "./dist/transport.d.ts",
+      "import": "./dist/transport.mjs",
+      "require": "./dist/transport.js"
+    },
+    "./strategy": {
+      "types": "./dist/strategy.d.ts",
+      "import": "./dist/strategy.mjs",
+      "require": "./dist/strategy.js"
+    },
+    "./sync": {
+      "types": "./dist/sync.d.ts",
+      "import": "./dist/sync.mjs",
+      "require": "./dist/sync.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.mjs",
+      "require": "./dist/types.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "transport": ["dist/transport.d.ts"],
+      "strategy": ["dist/strategy.d.ts"],
+      "sync": ["dist/sync.d.ts"],
+      "types": ["dist/types.d.ts"]
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "keywords": [],
+  "author": "Het Dave",
+  "license": "MIT",
+  "dependencies": {
+    "msgpackr": "^1.11.0",
+    "mqtt": "^5.10.0"
+  },
+  "peerDependencies": {
+    "@carverjs/core": "workspace:*",
+    "@react-three/fiber": ">=9.0.0",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "firebase": ">=10.0.0"
+  },
+  "peerDependenciesMeta": {
+    "firebase": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@carverjs/core": "workspace:*",
+    "@react-three/fiber": "^9.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "firebase": "^11.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  }
+}
