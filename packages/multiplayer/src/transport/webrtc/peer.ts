@@ -83,8 +83,10 @@ export class PeerConnection {
     }
   }
 
-  async createOffer(): Promise<RTCSessionDescriptionInit> {
-    const offer = await this._connection.createOffer();
+  async createOffer(options?: RTCOfferOptions): Promise<RTCSessionDescriptionInit> {
+    // `options` carries `{ iceRestart: true }` when renegotiating a dropped
+    // connection so a fresh ICE ufrag/pwd is generated (ICE restart).
+    const offer = await this._connection.createOffer(options);
     await this._connection.setLocalDescription(offer);
     return offer;
   }

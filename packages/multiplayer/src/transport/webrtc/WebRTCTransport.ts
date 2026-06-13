@@ -36,9 +36,26 @@ type RoomControlMessage =
   | { type: 'request-transfer-host'; peerId: string }
   | { type: 'sync-state'; room: Room; players: Player[] };
 
-/** Deterministic host election: lowest peerId alphabetically */
-function electHost(peerIds: string[]): string {
-  return [...peerIds].sort()[0];
+/**
+ * Deterministic, globally-consistent host election.
+ *
+ * Lowest hostPriority wins; ties are broken by lowest peerId. A peer advertises
+ * its priority via player metadata (`metadata.hostPriority`, lower = preferred)
+ * so the room creator / world owner can pin itself as host regardless of its
+ * random peerId. With no priorities advertised this reduces exactly to the
+ * previous "lowest peerId" election (backwards compatible).
+ */
+function electHost(peerIds: string[], rankOf: (peerId: string) => number): string {
+  let best = peerIds[0];
+  let bestRank = rankOf(best);
+  for (const id of peerIds) {
+    const rank = rankOf(id);
+    if (rank < bestRank || (rank === bestRank && id < best)) {
+      best = id;
+      bestRank = rank;
+    }
+  }
+  return best;
 }
 
 /**
@@ -167,10 +184,7 @@ export class WebRTCTransport implements CarverTransport {
     );
     this._strategyUnsubs.push(
       this._strategy.onPeerLeft((peerId) => {
-        this._removePeer(peerId);
-        this._playerMap.delete(peerId);
-        this._electAndSetHost();
-        for (const cb of this._callbacks.onPeerLeave) cb(peerId);
+        this._onStrategyPeerLeft(peerId);
       }),
     );
     this._strategyUnsubs.push(
@@ -314,16 +328,21 @@ export class WebRTCTransport implements CarverTransport {
     this._connectToPeer(peerId);
     this._peerSet.add(peerId);
 
+    // Preserve prior player fields if this is a RE-discovery (e.g. the peer's
+    // signaling presence flapped and was re-announced after a transient RTDB
+    // reconnect) so we don't reset joinedAt / isReady / latency on a peer whose
+    // P2P link never actually dropped.
+    const existing = this._playerMap.get(peerId);
     const player: Player = {
       peerId,
-      displayName: (meta.displayName as string) ?? `Player-${peerId.slice(0, 4)}`,
+      displayName: (meta.displayName as string) ?? existing?.displayName ?? `Player-${peerId.slice(0, 4)}`,
       isHost: false,
       isSelf: false,
-      isReady: false,
+      isReady: existing?.isReady ?? false,
       isConnected: true,
       metadata: meta as Record<string, unknown>,
-      latencyMs: 0,
-      joinedAt: Date.now(),
+      latencyMs: existing?.latencyMs ?? 0,
+      joinedAt: existing?.joinedAt ?? Date.now(),
     };
     this._playerMap.set(peerId, player);
     this._electAndSetHost();
@@ -462,9 +481,23 @@ export class WebRTCTransport implements CarverTransport {
 
   // ── Private: Host election ──
 
+  /**
+   * Host-election rank for a peer: lower wins. Reads `metadata.hostPriority`
+   * (advertised via player metadata / signaling presence, so every peer sees
+   * the same value). Peers that don't advertise a priority rank last, which
+   * preserves the legacy lowest-peerId election among them.
+   */
+  private _hostRank(peerId: string): number {
+    const meta = this._playerMap.get(peerId)?.metadata as Record<string, unknown> | undefined;
+    const priority = meta?.hostPriority;
+    return typeof priority === 'number' && Number.isFinite(priority)
+      ? priority
+      : Number.POSITIVE_INFINITY;
+  }
+
   private _electAndSetHost(): void {
     const allIds = [this._peerId, ...this._peerSet];
-    const newHostId = electHost(allIds);
+    const newHostId = electHost(allIds, (id) => this._hostRank(id));
     const changed = newHostId !== this._hostId;
     this._hostId = newHostId;
     this._isHost = newHostId === this._peerId;
@@ -515,18 +548,8 @@ export class WebRTCTransport implements CarverTransport {
             this._sendOnChannel(ROOM_CONTROL_CHANNEL, syncMsg, peerId);
           }, 100);
         }
-        if (state === 'failed') {
-          this._teardownPeer(peerId);
-        } else if (state === 'disconnected' && !this._disconnectTimers.has(peerId)) {
-          // ICE 'disconnected' is frequently transient. Tearing down
-          // instantly left half-alive sessions (old closures kept
-          // receiving while sends routed to a replacement connection).
-          // Grace period: only tear down if it doesn't recover.
-          this._disconnectTimers.set(peerId, setTimeout(() => {
-            this._disconnectTimers.delete(peerId);
-            const p = this._peers.get(peerId);
-            if (p && p.state !== 'connected') this._teardownPeer(peerId);
-          }, 5000));
+        if (state === 'failed' || state === 'disconnected') {
+          this._handleConnectionDrop(peerId, state);
         }
       },
       onDataChannel: (channel) => {
@@ -646,6 +669,53 @@ export class WebRTCTransport implements CarverTransport {
     for (const msg of q) {
       try { ch.send(msg as string); } catch { break; }
     }
+  }
+
+  /**
+   * Signaling presence reports a peer left. This is NOT authoritative for an
+   * established session: a transient signaling (Firebase/MQTT) disconnect can
+   * remove a peer's presence while the direct WebRTC link is perfectly healthy.
+   * Keep the peer if its connection is still 'connected'; genuine departures
+   * are also surfaced by the WebRTC connection-state machine
+   * (failed/disconnected -> _handleConnectionDrop), which tears the peer down.
+   */
+  private _onStrategyPeerLeft(peerId: string): void {
+    const peer = this._peers.get(peerId);
+    if (peer && peer.state === 'connected') return;
+    this._teardownPeer(peerId);
+  }
+
+  /**
+   * Self-heal a dropped P2P link instead of tearing it down immediately. ICE
+   * 'disconnected' is frequently transient and 'failed' can often recover via
+   * an ICE restart. The deterministic initiator (lower peerId) renegotiates by
+   * sending a fresh offer with iceRestart; the answerer replies through the
+   * existing _handleSignal('offer') path. A grace timer is the fallback: tear
+   * the peer down only if it doesn't return to 'connected'. Recovery to
+   * 'connected' cancels the timer (see onStateChange in _connectToPeer).
+   */
+  private _handleConnectionDrop(peerId: string, state: 'failed' | 'disconnected'): void {
+    if (this._disconnectTimers.has(peerId)) return; // already self-healing
+
+    // Initiator drives the ICE restart, mirroring initial-offer ownership.
+    if (this._peerId < peerId) {
+      const peer = this._peers.get(peerId);
+      peer?.createOffer({ iceRestart: true })
+        .then((offer) => {
+          // Bail if the peer was replaced/removed while creating the offer.
+          if (this._peers.get(peerId) === peer) {
+            this._strategy.signal(peerId, { type: 'offer', sdp: offer });
+          }
+        })
+        .catch(() => { /* restart failed; grace timer tears it down */ });
+    }
+
+    const graceMs = state === 'failed' ? 8000 : 5000;
+    this._disconnectTimers.set(peerId, setTimeout(() => {
+      this._disconnectTimers.delete(peerId);
+      const p = this._peers.get(peerId);
+      if (p && p.state !== 'connected') this._teardownPeer(peerId);
+    }, graceMs));
   }
 
   private _teardownPeer(peerId: string): void {

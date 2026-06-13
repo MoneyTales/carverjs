@@ -87,7 +87,7 @@ export class FirebaseStrategy implements SignalingStrategy {
 
     this._roomId = roomId;
     this._peerMeta = peerMeta;
-    const { ref, set, onChildAdded, onChildRemoved, onDisconnect, remove } = this._fb;
+    const { ref, set, onChildAdded, onChildRemoved, onDisconnect, onValue, remove } = this._fb;
     const paths = firebasePaths(this._appId, roomId, this.selfId);
 
     // Clean stale signals from our inbox before listening (prevents
@@ -102,6 +102,29 @@ export class FirebaseStrategy implements SignalingStrategy {
       ts: Date.now(),
     });
     onDisconnect(presenceRef).remove();
+
+    // 1b. Re-establish presence on EVERY reconnection to the RTDB. Firebase
+    // onDisconnect handlers fire only once and remove our presence node; the
+    // SDK does NOT re-create the value when it reconnects. Without this, a
+    // transient RTDB disconnect (tab backgrounding, network handoff, server
+    // recycling) permanently deletes our presence even though the P2P WebRTC
+    // links stay healthy — every other peer then sees onChildRemoved, tears
+    // down our connection, and the room fragments into isolated single-player
+    // sessions. Canonical presence pattern: re-arm onDisconnect BEFORE
+    // re-writing the value, on every transition to connected.
+    const generation = this._joinGeneration;
+    const connectedRef = ref(this._db, '.info/connected');
+    const connectedUnsub = onValue(connectedRef, (snap: any) => {
+      if (snap.val() !== true) return;
+      if (this._destroyed || this._joinGeneration !== generation || this._roomId !== roomId) return;
+      onDisconnect(presenceRef).remove()
+        .then(() => {
+          if (this._destroyed || this._joinGeneration !== generation || this._roomId !== roomId) return;
+          return set(presenceRef, { peerId: this.selfId, meta: peerMeta, ts: Date.now() });
+        })
+        .catch(() => {});
+    });
+    this._listeners.push(() => connectedUnsub());
 
     // 2. Listen for peers joining
     const peersRef = ref(this._db, paths.peers);
