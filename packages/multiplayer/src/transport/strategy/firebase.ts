@@ -61,6 +61,8 @@ export class FirebaseStrategy implements SignalingStrategy {
   // State
   private _knownPeers = new Set<string>();
   private _lobbyAnnounceTimer: ReturnType<typeof setInterval> | null = null;
+  private _lastAnnouncement: RoomAnnouncement | null = null;
+  private _lobbyWired = false;
   private _destroyed = false;
 
   constructor(appId: string, config: FirebaseStrategyConfig) {
@@ -190,6 +192,16 @@ export class FirebaseStrategy implements SignalingStrategy {
   subscribeToLobby(cb: (rooms: RoomAnnouncement[]) => void): () => void {
     this._onLobby.push(cb);
 
+    // Wire the underlying RTDB listener exactly once — repeated subscribe/
+    // unsubscribe cycles (React StrictMode, route changes) must not stack
+    // duplicate onValue listeners.
+    if (this._lobbyWired) {
+      return () => {
+        removeFromArray(this._onLobby, cb);
+      };
+    }
+    this._lobbyWired = true;
+
     this._ensureInit().then(() => {
       if (!this._db || !this._fb || this._destroyed) return;
       const { ref, onValue } = this._fb;
@@ -221,15 +233,27 @@ export class FirebaseStrategy implements SignalingStrategy {
     const { ref, set } = this._fb;
     const paths = firebasePaths(this._appId, announcement.roomId, '');
 
+    this._lastAnnouncement = announcement;
     announcement.lastSeen = Date.now();
-    set(ref(this._db, paths.roomLobbyEntry), announcement);
+    set(ref(this._db, paths.roomLobbyEntry), sanitizeForFirebase(announcement));
 
     // Periodic heartbeat
     if (this._lobbyAnnounceTimer) clearInterval(this._lobbyAnnounceTimer);
     this._lobbyAnnounceTimer = setInterval(() => {
       announcement.lastSeen = Date.now();
-      set(ref(this._db, paths.roomLobbyEntry), announcement);
+      set(ref(this._db, paths.roomLobbyEntry), sanitizeForFirebase(announcement));
     }, ROOM_ANNOUNCE_INTERVAL_MS);
+  }
+
+  updateRoomOccupancy(roomId: string, playerCount: number, state?: 'lobby' | 'playing' | 'ended'): void {
+    const ann = this._lastAnnouncement;
+    if (!ann || ann.roomId !== roomId || !this._db || !this._fb) return;
+    ann.playerCount = playerCount;
+    if (state) ann.state = state;
+    ann.lastSeen = Date.now();
+    const { ref, set } = this._fb;
+    const paths = firebasePaths(this._appId, roomId, '');
+    set(ref(this._db, paths.roomLobbyEntry), sanitizeForFirebase(ann));
   }
 
   removeRoomAnnouncement(roomId: string): void {
@@ -349,6 +373,7 @@ function sanitizeForFirebase(obj: unknown): unknown {
   if (typeof obj === 'object' && obj !== null) {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
+      if (value === undefined) continue; // RTDB rejects undefined anywhere in the payload
       result[key] = value === null ? '__null__' : sanitizeForFirebase(value);
     }
     return result;

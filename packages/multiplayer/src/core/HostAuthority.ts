@@ -1,4 +1,9 @@
-import type { CarverTransport, CarverChannel, EntityState } from "../types";
+import type {
+  CarverTransport,
+  CarverChannel,
+  EntityState,
+  PlayerInput,
+} from "../types";
 import { Codec, SnapshotBuffer } from "./codec";
 
 /**
@@ -95,11 +100,13 @@ export class HostAuthority {
   /**
    * Called every fixed tick by the sync engine.
    * Collects entity states and decides whether to broadcast.
+   * `hostInput` (prediction mode) is embedded in the snapshot packet as `hi`.
    */
   tick(
     currentTick: number,
     entities: Map<string, EntityState>,
     delta: number,
+    hostInput?: PlayerInput,
   ): void {
     this._tick = currentTick;
 
@@ -114,7 +121,7 @@ export class HostAuthority {
 
     // Broadcast to each connected client
     for (const peerId of this._transport.peers) {
-      this._broadcastToClient(peerId, currentTick, entities);
+      this._broadcastToClient(peerId, currentTick, entities, hostInput);
     }
   }
 
@@ -122,12 +129,13 @@ export class HostAuthority {
   forceKeyframe(
     currentTick: number,
     entities: Map<string, EntityState>,
+    hostInput?: PlayerInput,
   ): void {
     this._clientBaselines.clear();
     this._clientLastKeyframeTick.clear();
     this._snapshotBuffer.store(currentTick, new Map(entities));
     for (const peerId of this._transport.peers) {
-      this._broadcastToClient(peerId, currentTick, entities);
+      this._broadcastToClient(peerId, currentTick, entities, hostInput);
     }
   }
 
@@ -142,6 +150,7 @@ export class HostAuthority {
     peerId: string,
     currentTick: number,
     entities: Map<string, EntityState>,
+    hostInput?: PlayerInput,
   ): void {
     // Apply interest management filter
     let clientEntities = entities;
@@ -176,6 +185,7 @@ export class HostAuthority {
       needsKeyframe ? -1 : (clientBaseTick ?? -1),
       clientEntities,
       baseline,
+      hostInput,
     );
 
     if (packet) {

@@ -160,10 +160,23 @@ export class MqttStrategy implements SignalingStrategy {
     };
   }
 
+  private _lastAnnouncement: RoomAnnouncement | null = null;
+
+  updateRoomOccupancy(roomId: string, playerCount: number, state?: 'lobby' | 'playing' | 'ended'): void {
+    const ann = this._lastAnnouncement;
+    if (!ann || ann.roomId !== roomId || !this._client) return;
+    ann.playerCount = playerCount;
+    if (state) ann.state = state;
+    ann.lastSeen = Date.now();
+    const topic = mqttTopics(this._appId, roomId, '').roomLobbyEntry;
+    this._client.publish(topic, JSON.stringify(ann), { retain: true, qos: 1 });
+  }
+
   announceRoom(announcement: RoomAnnouncement): void {
     if (!this._client) return;
     const topic = mqttTopics(this._appId, announcement.roomId, '').roomLobbyEntry;
 
+    this._lastAnnouncement = announcement;
     announcement.lastSeen = Date.now();
     this._client.publish(topic, JSON.stringify(announcement), { retain: true, qos: 1 });
 

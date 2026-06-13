@@ -12,3 +12,5 @@ export { DebugOverlay } from "./DebugOverlay";
 export type { DebugStats, DebugOverlayOptions } from "./DebugOverlay";
 export { NetworkSimulator } from "./NetworkSimulator";
 export type { NetworkSimulatorOptions } from "./NetworkSimulator";
+export { InputBuffer } from "./InputBuffer";
+export { computeJustPressed } from "./InputUtils";

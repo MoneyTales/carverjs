@@ -410,6 +410,7 @@ export class WebRTCTransport implements CarverTransport {
       case 'request-room-state': {
         if (!this._isHost || !this._room) break;
         this._room.state = msg.state;
+        this._strategy.updateRoomOccupancy?.(this._room.id, this._room.playerCount, this._room.state);
         this._broadcastControlMessage({ type: 'room-updated', room: this._room });
         break;
       }
@@ -474,6 +475,8 @@ export class WebRTCTransport implements CarverTransport {
     if (this._room) {
       this._room.hostId = newHostId;
       this._room.playerCount = this._playerMap.size;
+      // Keep the lobby announcement's occupancy fresh (no-op on non-announcers)
+      this._strategy.updateRoomOccupancy?.(this._room.id, this._room.playerCount, this._room.state);
     }
 
     if (changed) {
@@ -483,11 +486,24 @@ export class WebRTCTransport implements CarverTransport {
 
   // ── Private: WebRTC peer management ──
 
+  /** Grace timers for transient ICE 'disconnected' states */
+  private _disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Sends queued while a data channel is not yet open: key = peerId channel */
+  private _pendingSends = new Map<string, (string | ArrayBuffer | Uint8Array)[]>();
+
   private _connectToPeer(peerId: string): void {
     if (this._peers.has(peerId)) return;
 
     const peer = new PeerConnection(peerId, this._iceConfig, {
       onStateChange: (state) => {
+        if (state === 'connected') {
+          // ICE recovered — cancel any pending transient-disconnect teardown
+          const timer = this._disconnectTimers.get(peerId);
+          if (timer) {
+            clearTimeout(timer);
+            this._disconnectTimers.delete(peerId);
+          }
+        }
         if (state === 'connected' && this._isHost && this._room) {
           // Send full state sync to the new peer
           const syncMsg: RoomControlMessage = {
@@ -499,11 +515,18 @@ export class WebRTCTransport implements CarverTransport {
             this._sendOnChannel(ROOM_CONTROL_CHANNEL, syncMsg, peerId);
           }, 100);
         }
-        if (state === 'failed' || state === 'disconnected') {
-          this._removePeer(peerId);
-          this._playerMap.delete(peerId);
-          this._electAndSetHost();
-          for (const cb of this._callbacks.onPeerLeave) cb(peerId);
+        if (state === 'failed') {
+          this._teardownPeer(peerId);
+        } else if (state === 'disconnected' && !this._disconnectTimers.has(peerId)) {
+          // ICE 'disconnected' is frequently transient. Tearing down
+          // instantly left half-alive sessions (old closures kept
+          // receiving while sends routed to a replacement connection).
+          // Grace period: only tear down if it doesn't recover.
+          this._disconnectTimers.set(peerId, setTimeout(() => {
+            this._disconnectTimers.delete(peerId);
+            const p = this._peers.get(peerId);
+            if (p && p.state !== 'connected') this._teardownPeer(peerId);
+          }, 5000));
         }
       },
       onDataChannel: (channel) => {
@@ -578,6 +601,9 @@ export class WebRTCTransport implements CarverTransport {
         // Ignore malformed messages
       }
     };
+    // Flush any sends that were queued before this channel was usable
+    dataChannel.onopen = () => this._flushPendingSends(peerId, channelName);
+    if (dataChannel.readyState === 'open') this._flushPendingSends(peerId, channelName);
   }
 
   private _sendOnChannel<T>(channelName: string, data: T, target?: string | string[]): void {
@@ -595,11 +621,38 @@ export class WebRTCTransport implements CarverTransport {
 
     for (const pid of targets) {
       const peer = this._peers.get(pid);
-      const ch = peer?.getDataChannel(channelName);
+      if (!peer) continue;
+      const ch = peer.getDataChannel(channelName);
       if (ch?.readyState === 'open') {
         try { ch.send(serialized as string); } catch { /* closed between check and send */ }
+      } else {
+        // Channel not open yet (the answering side waits for ondatachannel).
+        // Queue instead of silently dropping — flushed on channel open.
+        const key = pid + ' ' + channelName;
+        const q = this._pendingSends.get(key) ?? [];
+        if (q.length < 200) q.push(serialized as string | ArrayBuffer | Uint8Array);
+        this._pendingSends.set(key, q);
       }
     }
+  }
+
+  private _flushPendingSends(peerId: string, channelName: string): void {
+    const key = peerId + ' ' + channelName;
+    const q = this._pendingSends.get(key);
+    if (!q || q.length === 0) return;
+    const ch = this._peers.get(peerId)?.getDataChannel(channelName);
+    if (ch?.readyState !== 'open') return;
+    this._pendingSends.delete(key);
+    for (const msg of q) {
+      try { ch.send(msg as string); } catch { break; }
+    }
+  }
+
+  private _teardownPeer(peerId: string): void {
+    this._removePeer(peerId);
+    this._playerMap.delete(peerId);
+    this._electAndSetHost();
+    for (const cb of this._callbacks.onPeerLeave) cb(peerId);
   }
 
   private _removePeer(peerId: string): void {
@@ -607,6 +660,11 @@ export class WebRTCTransport implements CarverTransport {
     if (peer) { peer.close(); this._peers.delete(peerId); }
     this._peerSet.delete(peerId);
     this._rateLimitCounters.delete(peerId);
+    const timer = this._disconnectTimers.get(peerId);
+    if (timer) { clearTimeout(timer); this._disconnectTimers.delete(peerId); }
+    for (const key of [...this._pendingSends.keys()]) {
+      if (key.startsWith(peerId + ' ')) this._pendingSends.delete(key);
+    }
   }
 
   private _checkRateLimit(peerId: string): boolean {

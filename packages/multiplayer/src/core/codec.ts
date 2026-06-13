@@ -1,5 +1,5 @@
 import { pack, unpack } from "msgpackr";
-import type { EntityState, EntityState2D, EntityState3D } from "../types";
+import type { EntityState, EntityState2D, EntityState3D, PlayerInput, SnapshotPacket } from "../types";
 
 /** Configuration for delta thresholds */
 export interface DeltaThresholds {
@@ -126,32 +126,40 @@ export class Codec {
     return changed.length > 0 ? changed : null;
   }
 
-  /** Serialize a delta snapshot packet */
+  /** Serialize a delta snapshot packet (optionally embedding the host's own input as `hi`) */
   serializeDelta(
     tick: number,
     baseTick: number,
     current: Map<string, EntityState>,
     baseline: Map<string, EntityState> | undefined,
+    hostInput?: PlayerInput,
   ): Uint8Array | null {
     const delta = this.computeDelta(current, baseline);
     if (!delta) return null;
 
-    const packet = {
+    const packet: SnapshotPacket = {
       t: tick,
       b: baseline ? baseTick : -1, // -1 = keyframe
       s: this.serialize(delta),
+      ...(hostInput !== undefined ? { hi: hostInput } : {}),
     };
 
     return pack(packet);
   }
 
   /** Deserialize a snapshot packet */
-  deserializePacket(data: Uint8Array): { tick: number; baseTick: number; entities: EntityState[] } {
-    const packet = unpack(data) as { t: number; b: number; s: Uint8Array };
+  deserializePacket(data: Uint8Array): {
+    tick: number;
+    baseTick: number;
+    entities: EntityState[];
+    hostInput: PlayerInput | undefined;
+  } {
+    const packet = unpack(data) as { t: number; b: number; s: Uint8Array; hi?: PlayerInput };
     return {
       tick: packet.t,
       baseTick: packet.b,
       entities: this.deserialize(packet.s),
+      hostInput: packet.hi,
     };
   }
 

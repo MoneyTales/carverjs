@@ -1,7 +1,16 @@
 {
   "name": "@carverjs/core",
-  "version": "0.0.1",
-  "description": "",
+  "version": "0.0.2",
+  "description": "A batteries-included web game engine — React + Three.js components, hooks, ECS-lite systems, tweening, particles, and audio.",
+  "homepage": "https://docs.carverjs.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MoneyTales/carverjs.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/MoneyTales/carverjs/issues"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -61,7 +70,15 @@
     "build": "tsup",
     "dev": "tsup --watch"
   },
-  "keywords": [],
+  "keywords": [
+    "game-engine",
+    "threejs",
+    "react",
+    "react-three-fiber",
+    "webgl",
+    "3d",
+    "gamedev"
+  ],
   "author": "Het Dave",
   "license": "MIT",
   "dependencies": {

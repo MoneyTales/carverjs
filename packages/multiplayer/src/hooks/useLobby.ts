@@ -23,7 +23,7 @@ function announcementToRoom(ann: RoomAnnouncement): Room {
     isPrivate: ann.isPrivate,
     metadata: ann.metadata,
     createdAt: ann.createdAt,
-    state: 'lobby',
+    state: ann.state ?? 'lobby',
   };
 }
 
@@ -87,7 +87,7 @@ export function useLobby(options?: UseLobbyOptions): UseLobbyReturn {
       hostId: strategy.selfId,
       playerCount: 0,
       maxPlayers: config.maxPlayers ?? 8,
-      gameMode: config.metadata?.gameMode as string | undefined,
+      gameMode: config.gameMode ?? (config.metadata?.gameMode as string | undefined),
       isPrivate: config.isPrivate ?? false,
       metadata: config.metadata ?? {},
       createdAt: Date.now(),

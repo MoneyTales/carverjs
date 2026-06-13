@@ -17,6 +17,8 @@ export interface RoomAnnouncement {
   createdAt: number;
   /** Timestamp of last heartbeat (used for expiry detection) */
   lastSeen: number;
+  /** Live room state, refreshed via updateRoomOccupancy. Default: 'lobby' */
+  state?: 'lobby' | 'playing' | 'ended';
 }
 
 /** Configuration for the MQTT signaling strategy */
@@ -55,6 +57,12 @@ export interface SignalingStrategy {
 
   /** Connect to the signaling network */
   init(): Promise<void>;
+
+  /**
+   * Refresh the lobby announcement with live occupancy (optional).
+   * Only meaningful on the peer that originally announced the room.
+   */
+  updateRoomOccupancy?(roomId: string, playerCount: number, state?: 'lobby' | 'playing' | 'ended'): void;
 
   /** Join a room: announce presence, listen for peers and signals */
   joinRoom(roomId: string, peerMeta: PeerMetadata): Promise<void>;

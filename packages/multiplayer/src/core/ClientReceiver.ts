@@ -5,6 +5,7 @@ import type {
   EntityState2D,
   EntityState3D,
   NetworkQuality,
+  SnapshotListener,
 } from "../types";
 import { Codec } from "./codec";
 
@@ -46,6 +47,9 @@ export class ClientReceiver {
 
   // Entity state: full accumulated state from keyframes + deltas
   private _fullState = new Map<string, EntityState>();
+
+  // Listeners fired after each snapshot is merged into the full world state
+  private _snapshotListeners: SnapshotListener[] = [];
 
   constructor(
     transport: CarverTransport,
@@ -179,17 +183,24 @@ export class ClientReceiver {
     this._ackChannel.send("-1");
   }
 
+  /** Register a listener fired after each snapshot is merged into the full world state */
+  onSnapshot(cb: SnapshotListener): void {
+    this._snapshotListeners.push(cb);
+  }
+
   destroy(): void {
     this._snapshotChannel.close();
     this._ackChannel.close();
     this._buffer = [];
     this._interpolatedState.clear();
     this._fullState.clear();
+    this._snapshotListeners = [];
   }
 
   private _handleSnapshot(data: Uint8Array): void {
     try {
-      const { tick, baseTick, entities } = this._codec.deserializePacket(data);
+      const { tick, baseTick, entities, hostInput } =
+        this._codec.deserializePacket(data);
       const now = performance.now();
 
       if (baseTick === -1) {
@@ -210,9 +221,10 @@ export class ClientReceiver {
       }
 
       // Buffer the full state snapshot
+      const fullStateClone = new Map(this._fullState);
       this._buffer.push({
         tick,
-        entities: new Map(this._fullState),
+        entities: fullStateClone,
         receivedAt: now,
       });
 
@@ -223,6 +235,11 @@ export class ClientReceiver {
 
       // Send ACK
       this._ackChannel.send(String(tick));
+
+      // Notify snapshot listeners with the merged full world state
+      for (const cb of this._snapshotListeners) {
+        cb(tick, fullStateClone, hostInput);
+      }
 
       // Track timing for network quality
       this._lastSnapshotTime = now;

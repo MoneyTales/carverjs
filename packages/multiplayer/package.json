@@ -1,7 +1,25 @@
 {
   "name": "@carverjs/multiplayer",
-  "version": "0.0.1",
-  "description": "Multiplayer networking for CarverJS games",
+  "version": "0.0.2",
+  "description": "Serverless P2P multiplayer for CarverJS games — WebRTC mesh, lobbies, host authority, and state sync over MQTT or Firebase signaling.",
+  "homepage": "https://docs.carverjs.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MoneyTales/carverjs.git",
+    "directory": "packages/multiplayer"
+  },
+  "bugs": {
+    "url": "https://github.com/MoneyTales/carverjs/issues"
+  },
+  "keywords": [
+    "multiplayer",
+    "webrtc",
+    "p2p",
+    "netcode",
+    "gamedev",
+    "threejs",
+    "react"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -40,7 +58,9 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsup",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [],
   "author": "Het Dave",
@@ -50,7 +70,7 @@
     "mqtt": "^5.10.0"
   },
   "peerDependencies": {
-    "@carverjs/core": "workspace:*",
+    "@carverjs/core": ">=0.0.1",
     "@react-three/fiber": ">=9.0.0",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0",
@@ -68,6 +88,7 @@
     "@types/react-dom": "^19.2.3",
     "firebase": "^11.0.0",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.0"
   }
 }

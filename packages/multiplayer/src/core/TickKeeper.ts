@@ -60,6 +60,12 @@ export class TickKeeper {
     this._updateDriftCorrection();
   }
 
+  /** Hard-set the local tick (prediction rollback snap). Does not touch the accumulator. */
+  snapTick(tick: number): void {
+    this._tick = tick;
+    this._updateDriftCorrection();
+  }
+
   /**
    * Accumulate time and return the number of fixed ticks to process.
    * Call this once per render frame with the raw frame delta.

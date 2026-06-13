@@ -22,6 +22,8 @@ export { NetworkSimulator } from "./core/NetworkSimulator";
 export type { NetworkSimulatorOptions } from "./core/NetworkSimulator";
 export { InterestManager } from "./core/InterestManager";
 export type { InterestManagerOptions } from "./core/InterestManager";
+export { InputBuffer } from "./core/InputBuffer";
+export { computeJustPressed } from "./core/InputUtils";
 
 // Re-export types
 export type * from "./types";

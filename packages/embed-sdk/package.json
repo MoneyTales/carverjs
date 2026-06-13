@@ -1,0 +1,45 @@
+{
+  "name": "@carverjs/embed-sdk",
+  "version": "0.0.2",
+  "description": "Tiny SDK for games embedded in the CarverJS marketplace — typed postMessage to the parent shell without raw postMessage calls",
+  "homepage": "https://docs.carverjs.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MoneyTales/carverjs.git",
+    "directory": "packages/embed-sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/MoneyTales/carverjs/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch"
+  },
+  "keywords": [
+    "carverjs",
+    "embed",
+    "postmessage",
+    "iframe",
+    "games"
+  ],
+  "author": "Het Dave",
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  }
+}

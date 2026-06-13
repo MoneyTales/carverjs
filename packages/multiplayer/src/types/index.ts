@@ -129,16 +129,86 @@ export interface EntityState3D {
 
 export type EntityState = EntityState2D | EntityState3D;
 
+/** Flat per-tick input payload. Booleans get edge detection; numbers pass through. */
+export type PlayerInput = Record<string, boolean | number | undefined>;
+
+/**
+ * Game simulation callback for prediction mode.
+ * Keys of both maps are peer ids (the local player appears under transport.peerId).
+ * Invoked once per fixed tick (isRollback=false) and once per resimulated tick (isRollback=true).
+ */
+export type PhysicsStepCallback = (
+  inputs: Map<string, PlayerInput>,
+  justPressed: Map<string, PlayerInput>,
+  tick: number,
+  isRollback: boolean,
+  dt: number,
+) => void;
+
+/** Per-entity visual error offset produced by rollback. 2D uses x/y/a (z=0, q=identity); 3D uses x/y/z + quaternion (a=0). */
+export interface ErrorOffset {
+  x: number;
+  y: number;
+  z: number;
+  a: number;
+  qx: number;
+  qy: number;
+  qz: number;
+  qw: number;
+}
+
+/** World access used by PredictionSync for forward stepping and rollback. */
+export interface PredictionWorldDriver {
+  /** Read current state of every networked entity (raw physics, no error offsets). */
+  captureState(): Map<string, EntityState>;
+  /** Hard-apply states (position, rotation, velocities) to actors and rigid bodies, waking them. Skips tombstones. */
+  applyState(entities: Iterable<EntityState>): void;
+  /** Optional: step the physics world one fixed tick. If omitted, the game steps inside onPhysicsStep. */
+  stepWorld?(): void;
+}
+
+export interface PredictionSyncOptions {
+  /** Max |localTick - (serverTick + driftTargetTicks)| before hard tick snap (no resim). Default 15. */
+  maxRewindTicks?: number;
+  /** Per-axis positional jump (units) above which a rollback error vector is suppressed (intentional teleport). Default 150. */
+  snapThreshold?: number;
+  /** Multiplicative error decay per render frame. Default 0.85. */
+  errorDecay?: number;
+  /** Max positional correction magnitude applied per render frame. 0 = disabled (full decaying error applied). Default 0. */
+  maxErrorPerFrame?: number;
+  /** Neutral input payload used as fallback for unknown ticks/peers. Default {}. */
+  neutralInput?: PlayerInput;
+  /** Tick-history ring size for local and per-peer inputs. Default 120. */
+  inputHistorySize?: number;
+  /** Rollback snap target offset: snap target = serverTick + driftTargetTicks. Default 4. */
+  driftTargetTicks?: number;
+}
+
+/** Fired by ClientReceiver after each snapshot is merged into the full world state. */
+export type SnapshotListener = (
+  tick: number,
+  entities: Map<string, EntityState>,
+  hostInput: PlayerInput | undefined,
+) => void;
+
+/** Minimal structural source of merged snapshots (implemented by SnapshotSync). */
+export interface SnapshotSource {
+  onSnapshot(cb: SnapshotListener): void;
+}
+
 export interface SnapshotPacket {
   t: number;
   b: number;
   s: Uint8Array;
-  hi?: unknown;
+  hi?: PlayerInput;
 }
 
 export interface InputPacket {
+  /** Sender's local tick. */
   t: number;
-  i: unknown;
+  /** Per-tick input payload. */
+  i: PlayerInput;
+  /** Sender peerId (informational; receivers MUST key by transport-provided peerId). */
   p: string;
 }
 
@@ -216,13 +286,7 @@ export interface UseMultiplayerOptions {
     velocity?: number;
     custom?: 'strict' | number;
   };
-  prediction?: {
-    maxRewindTicks?: number;
-    errorSmoothingDecay?: number;
-    maxErrorPerFrame?: number;
-    snapThreshold?: number;
-    lagCompensation?: boolean;
-  };
+  prediction?: PredictionSyncOptions;
   interpolation?: {
     bufferSize?: number;
     method?: 'hermite' | 'linear';
@@ -240,7 +304,9 @@ export interface UseMultiplayerOptions {
     simulatedPacketLoss?: number;
     logLevel?: 'none' | 'error' | 'warn' | 'verbose';
   };
-  onPhysicsStep?: (inputs: Map<string, unknown>, tick: number, isRollback: boolean) => void;
+  /** Optional: step the physics world one fixed tick. Used for both forward sim and rollback resim. */
+  stepWorld?: () => void;
+  onPhysicsStep?: PhysicsStepCallback;
 }
 
 // ── Multiplayer Context Types ──

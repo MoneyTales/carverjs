@@ -1,376 +1,353 @@
-import { pack, unpack } from "msgpackr";
+/**
+ * Layer 3: Full-world prediction with full-world rollback.
+ * Ported from LumberNet, built on top of Layer 2 (SnapshotSync) as the
+ * authoritative state channel.
+ *
+ * Flow:
+ *   Every peer (host included): broadcast tick-stamped input to ALL peers each
+ *   fixed tick on carver:inputs, simulate EVERY networked entity forward with
+ *   last-known remote inputs (hold-last-input extrapolation).
+ *
+ *   Host: stays authoritative; SnapshotSync broadcasts delta-compressed,
+ *   ACK-driven snapshots with the host's own input embedded (`hi`).
+ *
+ *   Client: on each accepted snapshot, reset ALL networked entities to server
+ *   state, resimulate from serverTick + 1 to localTick replaying per-tick
+ *   inputs for every peer, and convert the visual discontinuity into
+ *   per-entity error offsets decayed per render frame.
+ *
+ * Role is checked dynamically via transport.isHost at every use site (host
+ * migration is best-effort).
+ */
+
 import type {
   CarverTransport,
   CarverChannel,
   EntityState,
-  EntityState3D,
+  ErrorOffset,
   InputPacket,
+  PhysicsStepCallback,
+  PlayerInput,
+  PredictionSyncOptions,
+  PredictionWorldDriver,
+  SnapshotSource,
 } from "../types";
-import { Codec } from "../core/codec";
 import { TickKeeper } from "../core/TickKeeper";
+import { InputBuffer } from "../core/InputBuffer";
+import { computeJustPressed } from "../core/InputUtils";
+import { applyRollback, quatAngle, quatScaleAngle } from "./Rollback";
 
-interface PredictionOptions {
-  maxRewindTicks: number;
-  errorSmoothingDecay: number;
-  maxErrorPerFrame: number;
-  snapThreshold: number;
-  lagCompensation: boolean;
-}
-
-interface InputBufferEntry {
-  tick: number;
-  input: unknown;
-}
-
-interface ErrorCorrection {
-  x: number;
-  y: number;
-  z: number;
-}
-
-const DEFAULT_OPTIONS: PredictionOptions = {
+const DEFAULT_OPTIONS: Required<PredictionSyncOptions> = {
   maxRewindTicks: 15,
-  errorSmoothingDecay: 0.85,
-  maxErrorPerFrame: 5,
-  snapThreshold: 15,
-  lagCompensation: false,
+  snapThreshold: 150,
+  errorDecay: 0.85,
+  maxErrorPerFrame: 0,
+  neutralInput: {},
+  inputHistorySize: 120,
+  driftTargetTicks: 4,
 };
 
-/**
- * Layer 3: Client-side prediction with server reconciliation.
- * Builds on top of Layer 2 (SnapshotSync).
- *
- * Flow:
- *   Client: input -> apply locally (predict) -> store in buffer -> send to host
- *   Host: receive input -> apply to simulation -> broadcast state + lastProcessedInputTick
- *   Client: receive state -> compare with prediction ->
- *           if mismatch: reset to server state + replay unacked inputs -> visual smoothing
- */
+interface PendingSnapshot {
+  t: number;
+  entities: Map<string, EntityState>;
+  hostInput: PlayerInput | undefined;
+}
+
 export class PredictionSync {
   private _transport: CarverTransport;
-  private _codec: Codec;
   private _tickKeeper: TickKeeper;
-  private _options: PredictionOptions;
+  private _options: Required<PredictionSyncOptions>;
 
-  // Channels
-  private _inputChannel: CarverChannel<string>;
-  private _stateChannel: CarverChannel<Uint8Array>;
-  private _ackChannel: CarverChannel<string>;
+  // Reliable ordered all-to-all input channel
+  private _inputChannel: CarverChannel<InputPacket>;
 
-  // Input buffer: ring buffer of recent inputs keyed by tick
-  private _inputBuffer: InputBufferEntry[] = [];
-  // Per-client last processed input tick (host-side tracking)
-  private _clientLastProcessedTick = new Map<string, number>();
+  // Local + per-peer tick-stamped input history
+  private _inputs: InputBuffer;
 
-  // Predicted state (client-side)
-  private _predictedState = new Map<string, EntityState>();
+  // Local input; persists across ticks until replaced (hold-input semantics)
+  private _currentInput: PlayerInput | null = null;
 
-  // Error correction vectors per entity
-  private _errorCorrections = new Map<string, ErrorCorrection>();
+  // Newest pending server snapshot awaiting rollback (only the newest survives)
+  private _pending: PendingSnapshot | null = null;
 
-  // Server state (last received authoritative snapshot)
-  private _serverState = new Map<string, EntityState>();
+  // Per-entity accumulated visual error offsets
+  private _errors = new Map<string, ErrorOffset>();
+
   private _serverTick = 0;
+  private _lastAppliedServerTick = 0;
 
-  // Physics step callback (provided by developer)
-  private _onPhysicsStep:
-    | ((inputs: Map<string, unknown>, tick: number, isRollback: boolean) => void)
-    | null = null;
-
-  // Own input for current tick
-  private _currentInput: unknown = null;
-
-  // Is host
-  private _isHost: boolean;
+  private _worldDriver: PredictionWorldDriver | null = null;
+  private _onPhysicsStep: PhysicsStepCallback | null = null;
 
   constructor(
     transport: CarverTransport,
-    codec: Codec,
     tickKeeper: TickKeeper,
-    options?: Partial<PredictionOptions>,
+    snapshots: SnapshotSource,
+    options?: PredictionSyncOptions,
   ) {
     this._transport = transport;
-    this._codec = codec;
     this._tickKeeper = tickKeeper;
     this._options = { ...DEFAULT_OPTIONS, ...options };
-    this._isHost = transport.isHost;
 
-    // Reliable channel for inputs (client -> host)
-    this._inputChannel = transport.createChannel<string>("carver:inputs", {
+    this._inputs = new InputBuffer(
+      this._options.neutralInput,
+      this._options.inputHistorySize,
+    );
+
+    // All-to-all input broadcast channel (registered regardless of role)
+    this._inputChannel = transport.createChannel<InputPacket>("carver:inputs", {
       reliable: true,
       ordered: true,
     });
 
-    // Unreliable channel for state (host -> clients)
-    this._stateChannel = transport.createChannel<Uint8Array>("carver:pred-state", {
-      reliable: false,
-      ordered: false,
-      maxRetransmits: 0,
+    this._inputChannel.onReceive(
+      (data: InputPacket | string, peerId: string) => {
+        try {
+          const packet =
+            typeof data === "string" ? (JSON.parse(data) as InputPacket) : data;
+          if (
+            typeof packet.t === "number" &&
+            packet.i !== null &&
+            typeof packet.i === "object"
+          ) {
+            // Key by the transport-provided sender id; never trust packet.p
+            this._inputs.setRemote(peerId, packet.i, packet.t);
+          }
+        } catch (err) {
+          if (typeof console !== "undefined")
+            console.debug("[CarverJS] Malformed input packet:", err);
+        }
+      },
+    );
+
+    // Accepted snapshots become pending rollbacks (clients only)
+    snapshots.onSnapshot((tick, entities, hostInput) => {
+      if (this._transport.isHost) return;
+      if (tick <= this._lastAppliedServerTick) return;
+      this._serverTick = tick;
+      this._tickKeeper.setServerTick(tick);
+      if (!this._pending || tick > this._pending.t) {
+        this._pending = { t: tick, entities, hostInput };
+      }
     });
 
-    // Reliable ACK channel
-    this._ackChannel = transport.createChannel<string>("carver:pred-acks", {
-      reliable: true,
-      ordered: true,
+    // Drop input state for departed peers
+    transport.onPeerLeave(() => {
+      this._inputs.setPeerIds(this._transport.peers);
     });
-
-    if (this._isHost) {
-      this._setupHostListeners();
-    } else {
-      this._setupClientListeners();
-    }
   }
 
-  /** Set the physics step callback (required for rollback re-simulation) */
-  setPhysicsStep(
-    cb: (inputs: Map<string, unknown>, tick: number, isRollback: boolean) => void,
-  ): void {
+  // ── Wiring ──
+
+  /** Set the game simulation callback (forward sim + rollback resim). */
+  setPhysicsStep(cb: PhysicsStepCallback): void {
     this._onPhysicsStep = cb;
   }
 
-  /** Set the current input for this tick (client-side) */
-  setInput(input: unknown): void {
+  /** Set the world driver used for forward stepping and rollback. */
+  setWorldDriver(driver: PredictionWorldDriver): void {
+    this._worldDriver = driver;
+  }
+
+  // ── Input ──
+
+  /** Set the local player's input. PERSISTS across ticks until replaced. */
+  setInput(input: PlayerInput): void {
     this._currentInput = input;
   }
 
+  /** Local input stored at the given tick (neutral fallback). Used by the host to embed `hi`. */
+  getLocalInput(tick: number): PlayerInput {
+    return this._inputs.getTick(tick);
+  }
+
+  // ── Frame lifecycle ──
+
   /**
-   * Called every fixed tick on the client.
-   * Applies input locally (prediction), buffers it, and sends to host.
+   * Apply the newest pending server snapshot (full-world rollback).
+   * Call once per render frame BEFORE tickKeeper.update().
+   * No-op on host or when nothing is pending.
    */
-  clientTick(tick: number): void {
-    if (this._isHost) return;
+  beginFrame(): void {
+    if (this._transport.isHost || !this._pending) return;
 
-    // Buffer the input
-    if (this._currentInput !== null) {
-      this._inputBuffer.push({ tick, input: this._currentInput });
+    const pending = this._pending;
+    this._pending = null;
+    this._lastAppliedServerTick = pending.t;
 
-      // Send input to host
-      const packet: InputPacket = {
-        t: tick,
-        i: this._currentInput,
-        p: this._transport.peerId,
-      };
-      this._inputChannel.send(JSON.stringify(packet));
-
-      // Apply input locally (prediction)
-      if (this._onPhysicsStep) {
-        const inputs = new Map<string, unknown>();
-        inputs.set(this._transport.peerId, this._currentInput);
-        this._onPhysicsStep(inputs, tick, false);
-      }
-
-      this._currentInput = null;
+    // Consume the host's embedded input: last-known AND tick history at the snapshot tick
+    if (pending.hostInput !== undefined) {
+      this._inputs.setRemote(
+        this._transport.hostId,
+        pending.hostInput,
+        pending.t,
+      );
     }
 
-    // Trim old inputs from buffer
-    const minTick = tick - this._options.maxRewindTicks * 2;
-    while (this._inputBuffer.length > 0 && this._inputBuffer[0].tick < minTick) {
-      this._inputBuffer.shift();
+    // Rollback is impossible without world access (bookkeeping above still happened)
+    if (!this._worldDriver) return;
+
+    const result = applyRollback({
+      serverTick: pending.t,
+      serverState: pending.entities,
+      localTick: this._tickKeeper.tick,
+      localPeerId: this._transport.peerId,
+      inputs: this._inputs,
+      currentErrors: this._errors,
+      driver: this._worldDriver,
+      callback: this._onPhysicsStep,
+      dt: this._tickKeeper.tickDelta,
+      driftTargetTicks: this._options.driftTargetTicks,
+      maxRewindTicks: this._options.maxRewindTicks,
+      snapThreshold: this._options.snapThreshold,
+    });
+    this._errors = result.errors;
+    if (result.newLocalTick !== this._tickKeeper.tick) {
+      this._tickKeeper.snapTick(result.newLocalTick);
     }
   }
 
   /**
-   * Called every fixed tick on the host.
-   * Processes received inputs and broadcasts authoritative state.
+   * Run one forward fixed tick (host AND client): store + broadcast input,
+   * build per-tick input maps, invoke the callback, then step the world.
    */
-  hostTick(tick: number, entities: Map<string, EntityState>, _delta: number): void {
-    if (!this._isHost) return;
+  tick(tick: number): void {
+    const localInput = this._currentInput ?? { ...this._options.neutralInput };
 
-    // Broadcast authoritative state with per-client last processed input tick
-    const stateArray = Array.from(entities.values());
-    const data = this._codec.serialize(stateArray);
+    // Store a copy so each tick gets its own history entry
+    this._inputs.storeTick(tick, localInput);
 
-    // Send per-client packets with each client's own last processed input tick
-    for (const peerId of this._transport.peers) {
-      const lastTick = this._clientLastProcessedTick.get(peerId) ?? -1;
-      const packet = {
-        t: tick,
-        s: data,
-        li: lastTick,
-      };
-      this._stateChannel.send(pack(packet), peerId);
+    // Broadcast to ALL peers every tick (reliable-ordered guarantees tick history)
+    this._inputChannel.send({
+      t: tick,
+      i: localInput,
+      p: this._transport.peerId,
+    });
+
+    // Build per-tick maps: last-known remote inputs (hold-last-input extrapolation)
+    const prevTick = tick - 1;
+    const tickInputs = this._inputs.allRemotes();
+    tickInputs.delete(this._transport.peerId); // defensive: never simulate self as remote
+    const justPressed = new Map<string, PlayerInput>();
+    for (const [peerId, inp] of tickInputs) {
+      justPressed.set(
+        peerId,
+        computeJustPressed(inp, this._inputs.getRemoteAtTick(peerId, prevTick)),
+      );
     }
+    tickInputs.set(this._transport.peerId, localInput);
+    justPressed.set(
+      this._transport.peerId,
+      this._inputs.hasTick(prevTick)
+        ? computeJustPressed(localInput, this._inputs.getTick(prevTick))
+        : this._inputs.getJustPressedZero(), // suppress spurious edges after snap/rejoin
+    );
+
+    if (this._onPhysicsStep) {
+      this._onPhysicsStep(
+        tickInputs,
+        justPressed,
+        tick,
+        false,
+        this._tickKeeper.tickDelta,
+      );
+    }
+
+    // Callback first (applies forces), then step
+    this._worldDriver?.stepWorld?.();
   }
 
   /**
-   * Called every render frame on the client to apply visual error smoothing.
-   * Returns the corrected entity states.
+   * Decay stored error offsets and return the portion to ADD to rendered
+   * transforms this frame. Call exactly once per render frame.
    */
-  applyErrorSmoothing(entities: Map<string, EntityState>): Map<string, EntityState> {
-    const result = new Map<string, EntityState>();
-    const decay = this._options.errorSmoothingDecay;
+  getRenderErrorOffsets(): Map<string, ErrorOffset> {
+    const result = new Map<string, ErrorOffset>();
+    const decay = this._options.errorDecay;
+    const maxErr = this._options.maxErrorPerFrame;
 
-    for (const [id, entity] of entities) {
-      const correction = this._errorCorrections.get(id);
-      if (!correction) {
-        result.set(id, entity);
-        continue;
+    for (const [id, e] of this._errors) {
+      // Decay
+      e.x *= decay;
+      e.y *= decay;
+      e.z *= decay;
+      e.a *= decay;
+      let q = quatScaleAngle({ x: e.qx, y: e.qy, z: e.qz, w: e.qw }, decay);
+
+      // Zero-clamp
+      if (Math.abs(e.x) < 0.1) e.x = 0;
+      if (Math.abs(e.y) < 0.1) e.y = 0;
+      if (Math.abs(e.z) < 0.1) e.z = 0;
+      if (Math.abs(e.a) < 0.001) e.a = 0;
+      if (quatAngle(q) < 0.001) q = { x: 0, y: 0, z: 0, w: 1 };
+      e.qx = q.x;
+      e.qy = q.y;
+      e.qz = q.z;
+      e.qw = q.w;
+
+      // Applied portion (position cap only; angular error always applied in full)
+      let ax = e.x;
+      let ay = e.y;
+      let az = e.z;
+      if (maxErr > 0) {
+        const mag = Math.hypot(e.x, e.y, e.z);
+        if (mag > maxErr) {
+          const s = maxErr / mag;
+          ax = e.x * s;
+          ay = e.y * s;
+          az = e.z * s;
+          e.x -= ax;
+          e.y -= ay;
+          e.z -= az;
+        } else {
+          // Fully applied and consumed
+          e.x = 0;
+          e.y = 0;
+          e.z = 0;
+        }
       }
 
-      // Apply correction and decay
-      const corrected = { ...entity };
-      corrected.x += correction.x;
-      corrected.y += correction.y;
-      if ("z" in corrected) {
-        (corrected as EntityState3D).z += correction.z;
+      const quatIsIdentity =
+        e.qx === 0 && e.qy === 0 && e.qz === 0 && e.qw === 1;
+
+      if (ax !== 0 || ay !== 0 || az !== 0 || e.a !== 0 || !quatIsIdentity) {
+        result.set(id, {
+          x: ax,
+          y: ay,
+          z: az,
+          a: e.a,
+          qx: e.qx,
+          qy: e.qy,
+          qz: e.qz,
+          qw: e.qw,
+        });
       }
 
-      // Decay the correction
-      correction.x *= decay;
-      correction.y *= decay;
-      correction.z *= decay;
-
-      // Remove if negligible
-      const mag = Math.abs(correction.x) + Math.abs(correction.y) + Math.abs(correction.z);
-      if (mag < 0.001) {
-        this._errorCorrections.delete(id);
+      if (e.x === 0 && e.y === 0 && e.z === 0 && e.a === 0 && quatIsIdentity) {
+        this._errors.delete(id);
       }
-
-      result.set(id, corrected);
     }
 
     return result;
   }
 
-  get predictedState(): Map<string, EntityState> {
-    return this._predictedState;
-  }
+  // ── State ──
 
+  /** Tick of the newest RECEIVED snapshot. */
   get serverTick(): number {
     return this._serverTick;
   }
 
+  /** Tick of the newest APPLIED (rolled-back) snapshot, 0 initially. */
+  get lastAppliedServerTick(): number {
+    return this._lastAppliedServerTick;
+  }
+
   destroy(): void {
     this._inputChannel.close();
-    this._stateChannel.close();
-    this._ackChannel.close();
-    this._inputBuffer = [];
-    this._predictedState.clear();
-    this._errorCorrections.clear();
-    this._serverState.clear();
-  }
-
-  // ── Private: Host-side ──
-
-  private _setupHostListeners(): void {
-    // Receive inputs from clients
-    this._inputChannel.onReceive((rawData: string, peerId: string) => {
-      try {
-        const packet: InputPacket = JSON.parse(rawData);
-        // Apply input to simulation via callback
-        if (this._onPhysicsStep) {
-          const inputs = new Map<string, unknown>();
-          inputs.set(peerId, packet.i);
-          this._onPhysicsStep(inputs, packet.t, false);
-        }
-        const prevTick = this._clientLastProcessedTick.get(peerId) ?? -1;
-        this._clientLastProcessedTick.set(peerId, Math.max(prevTick, packet.t));
-      } catch (err) {
-        if (typeof console !== 'undefined') console.debug('[CarverJS] Malformed input packet:', err);
-      }
-    });
-  }
-
-  // ── Private: Client-side ──
-
-  private _setupClientListeners(): void {
-    // Receive authoritative state from host
-    this._stateChannel.onReceive((data: Uint8Array) => {
-      try {
-        const packet = unpack(data) as { t: number; s: Uint8Array; li: number };
-
-        const entities = this._codec.deserialize(packet.s);
-        const serverTick = packet.t;
-        const lastInputTick = packet.li;
-
-        this._serverTick = serverTick;
-        this._tickKeeper.setServerTick(serverTick);
-
-        // Build server state map
-        this._serverState.clear();
-        for (const entity of entities) {
-          this._serverState.set(entity.id, entity);
-        }
-
-        // Reconciliation: compare predicted state with server state
-        this._reconcile(lastInputTick);
-      } catch (err) {
-        if (typeof console !== 'undefined') console.debug('[CarverJS] Malformed state packet:', err);
-      }
-    });
-  }
-
-  private _reconcile(lastInputTick: number): void {
-    // Remove acknowledged inputs from buffer
-    this._inputBuffer = this._inputBuffer.filter((entry) => entry.tick > lastInputTick);
-
-    // Compare predicted state with server state
-    let needsRollback = false;
-    let maxError = 0;
-
-    for (const [id, serverEntity] of this._serverState) {
-      const predicted = this._predictedState.get(id);
-      if (!predicted) continue;
-
-      const error = this._computeError(predicted, serverEntity);
-      maxError = Math.max(maxError, error);
-
-      if (error > this._options.maxErrorPerFrame) {
-        needsRollback = true;
-      }
-    }
-
-    if (maxError > this._options.snapThreshold) {
-      // Error too large -- hard snap to server state
-      this._predictedState = new Map(this._serverState);
-      this._errorCorrections.clear();
-      return;
-    }
-
-    if (needsRollback) {
-      // Store current positions for visual smoothing
-      const oldPositions = new Map<string, { x: number; y: number; z: number }>();
-      for (const [id, entity] of this._predictedState) {
-        oldPositions.set(id, {
-          x: entity.x,
-          y: entity.y,
-          z: "z" in entity ? (entity as EntityState3D).z : 0,
-        });
-      }
-
-      // Reset to server state
-      this._predictedState = new Map(this._serverState);
-
-      // Replay unacked inputs
-      if (this._onPhysicsStep) {
-        for (const entry of this._inputBuffer) {
-          const inputs = new Map<string, unknown>();
-          inputs.set(this._transport.peerId, entry.input);
-          this._onPhysicsStep(inputs, entry.tick, true); // isRollback = true
-        }
-      }
-
-      // Compute visual error correction vectors
-      for (const [id, newEntity] of this._predictedState) {
-        const oldPos = oldPositions.get(id);
-        if (oldPos) {
-          this._errorCorrections.set(id, {
-            x: oldPos.x - newEntity.x,
-            y: oldPos.y - newEntity.y,
-            z: oldPos.z - ("z" in newEntity ? (newEntity as EntityState3D).z : 0),
-          });
-        }
-      }
-    }
-  }
-
-  private _computeError(predicted: EntityState, server: EntityState): number {
-    const dx = predicted.x - server.x;
-    const dy = predicted.y - server.y;
-    let dz = 0;
-    if ("z" in predicted && "z" in server) {
-      dz = (predicted as EntityState3D).z - (server as EntityState3D).z;
-    }
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    this._inputs.clear();
+    this._errors.clear();
+    this._pending = null;
+    this._currentInput = null;
   }
 }

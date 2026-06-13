@@ -65,6 +65,7 @@ export function MultiplayerProvider({
 }: MultiplayerProviderProps) {
   const managerRef = useRef<NetworkManager | null>(null);
   const strategyRef = useRef<SignalingStrategy | null>(null);
+  const destroyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   if (!managerRef.current) {
     managerRef.current = new NetworkManager();
@@ -74,11 +75,22 @@ export function MultiplayerProvider({
   }
 
   useEffect(() => {
+    // React StrictMode simulates unmount/remount. Destroying synchronously in
+    // cleanup left the remounted tree holding already-destroyed instances
+    // captured at render time (dead lobby, dead transport). Defer destruction
+    // one tick and cancel it when the effect re-runs.
+    if (destroyTimerRef.current) {
+      clearTimeout(destroyTimerRef.current);
+      destroyTimerRef.current = null;
+    }
     return () => {
-      strategyRef.current?.destroy();
-      strategyRef.current = null;
-      managerRef.current?.destroy();
-      managerRef.current = null;
+      destroyTimerRef.current = setTimeout(() => {
+        destroyTimerRef.current = null;
+        strategyRef.current?.destroy();
+        strategyRef.current = null;
+        managerRef.current?.destroy();
+        managerRef.current = null;
+      }, 0);
     };
   }, []);
 

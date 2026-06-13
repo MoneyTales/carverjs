@@ -1,4 +1,10 @@
-import type { CarverTransport, EntityState } from "../types";
+import type {
+  CarverTransport,
+  EntityState,
+  PlayerInput,
+  SnapshotListener,
+  SnapshotSource,
+} from "../types";
 import { Codec, SnapshotBuffer } from "../core/codec";
 import { HostAuthority } from "../core/HostAuthority";
 import { ClientReceiver } from "../core/ClientReceiver";
@@ -16,12 +22,15 @@ export interface SnapshotSyncOptions {
  * Layer 2: Snapshot interpolation sync engine.
  * Host broadcasts state at fixed intervals, clients interpolate.
  */
-export class SnapshotSync {
+export class SnapshotSync implements SnapshotSource {
   private _transport: CarverTransport;
   private _hostAuthority: HostAuthority | null = null;
   private _clientReceiver: ClientReceiver | null = null;
   private _codec: Codec;
   private _snapshotBuffer: SnapshotBuffer;
+
+  // Snapshot listeners survive host migration (forwarder re-attached on demote)
+  private _snapshotListeners: SnapshotListener[] = [];
 
   constructor(
     transport: CarverTransport,
@@ -50,6 +59,7 @@ export class SnapshotSync {
         extrapolateMs: options?.extrapolateMs,
         is2D: options?.is2D,
       });
+      this._attachSnapshotForwarder(this._clientReceiver);
     }
   }
 
@@ -70,8 +80,14 @@ export class SnapshotSync {
     tick: number,
     entities: Map<string, EntityState>,
     delta: number,
+    hostInput?: PlayerInput,
   ): void {
-    this._hostAuthority?.tick(tick, entities, delta);
+    this._hostAuthority?.tick(tick, entities, delta, hostInput);
+  }
+
+  /** Register a listener fired after each merged snapshot (client side). */
+  onSnapshot(cb: SnapshotListener): void {
+    this._snapshotListeners.push(cb);
   }
 
   /** Client: called every render frame to interpolate */
@@ -115,6 +131,7 @@ export class SnapshotSync {
         is2D: options?.is2D,
       },
     );
+    this._attachSnapshotForwarder(this._clientReceiver);
   }
 
   destroy(): void {
@@ -122,5 +139,15 @@ export class SnapshotSync {
     this._clientReceiver?.destroy();
     this._hostAuthority = null;
     this._clientReceiver = null;
+    this._snapshotListeners = [];
+  }
+
+  // ── Private ──
+
+  /** Forward receiver snapshots to registered listeners (survives host migration). */
+  private _attachSnapshotForwarder(receiver: ClientReceiver): void {
+    receiver.onSnapshot((t, e, hi) => {
+      for (const l of this._snapshotListeners) l(t, e, hi);
+    });
   }
 }

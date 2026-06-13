@@ -9,12 +9,16 @@ import type {
   EntityState,
   EntityState2D,
   EntityState3D,
+  PlayerInput,
+  PredictionWorldDriver,
 } from "../types";
 import { useMultiplayerContext } from "../core/MultiplayerContext";
 import { EventSync } from "../sync/EventSync";
 import { SnapshotSync } from "../sync/SnapshotSync";
 import type { SnapshotSyncOptions } from "../sync/SnapshotSync";
 import { PredictionSync } from "../sync/PredictionSync";
+import { quatMultiply, quatInvert } from "../sync/Rollback";
+import type { Quat } from "../sync/Rollback";
 import { NetworkSimulator } from "../core/NetworkSimulator";
 
 // ── Return type ──
@@ -26,6 +30,8 @@ export interface UseMultiplayerReturn {
   serverTick: number;
   drift: number;
   syncEngine: SyncMode;
+  /** Set the local player's input (prediction mode). Stable callback; no-op in events/snapshot modes. */
+  setInput: (input: PlayerInput) => void;
 }
 
 // ── Helpers: read / write actor state ──
@@ -173,6 +179,38 @@ function applyState3D(ref: ActorRef, state: EntityState3D): void {
   }
 }
 
+/** Hard state apply for prediction/rollback: transform plus linear and angular velocity. */
+function applyStateHard2D(ref: ActorRef, state: EntityState2D): void {
+  applyState2D(ref, state);
+
+  if (ref.rigidBody) {
+    try {
+      if (typeof ref.rigidBody.setLinvel === "function") {
+        ref.rigidBody.setLinvel({ x: state.vx, y: state.vy }, true);
+      }
+      if (typeof ref.rigidBody.setAngvel === "function") {
+        ref.rigidBody.setAngvel(state.va, true);
+      }
+    } catch { /* velocity API may not be available */ }
+  }
+}
+
+/** Hard state apply for prediction/rollback: transform plus linear and angular velocity. */
+function applyStateHard3D(ref: ActorRef, state: EntityState3D): void {
+  applyState3D(ref, state);
+
+  if (ref.rigidBody) {
+    try {
+      if (typeof ref.rigidBody.setLinvel === "function") {
+        ref.rigidBody.setLinvel({ x: state.vx, y: state.vy, z: state.vz }, true);
+      }
+      if (typeof ref.rigidBody.setAngvel === "function") {
+        ref.rigidBody.setAngvel({ x: state.wx, y: state.wy, z: state.wz }, true);
+      }
+    } catch { /* velocity API may not be available */ }
+  }
+}
+
 function applyEntityState(
   ref: ActorRef,
   state: EntityState,
@@ -199,6 +237,25 @@ function applyStatesToActors(
 
     applyEntityState(ref, state, is2D);
   }
+}
+
+// ── Applied error-offset bookkeeping (prediction mode, render-only) ──
+
+interface AppliedErrorRecord {
+  x: number;
+  y: number;
+  z: number;
+  a: number;
+  q: Quat;
+  px: number;
+  py: number;
+  pz: number;
+}
+
+const IDENTITY_QUAT: Quat = { x: 0, y: 0, z: 0, w: 1 };
+
+function isIdentityQuat(q: Quat): boolean {
+  return q.x === 0 && q.y === 0 && q.z === 0 && q.w === 1;
 }
 
 // ── Hook ──
@@ -228,6 +285,11 @@ export function useMultiplayer(
   // Track whether we were the host last frame to detect migration
   const wasHostRef = useRef<boolean | null>(null);
 
+  // Error offsets applied to rendered transforms last frame (prediction mode).
+  // px/py/pz fingerprint the post-application position so we only undo when
+  // nothing else rewrote the transform in between.
+  const appliedErrorsRef = useRef(new Map<string, AppliedErrorRecord>());
+
   // Build SnapshotSyncOptions from user options
   const buildSnapshotOpts = useCallback((): SnapshotSyncOptions => {
     return {
@@ -245,6 +307,44 @@ export function useMultiplayer(
     options.interpolation?.method,
     options.interpolation?.extrapolateMs,
   ]);
+
+  // Undo last frame's render-only error offsets so physics/rollback sees raw transforms.
+  const undoAppliedErrorOffsets = useCallback(() => {
+    const registry = actorRegistry.current;
+    for (const [id, e] of appliedErrorsRef.current) {
+      const ref = registry.get(id);
+      if (!ref) {
+        appliedErrorsRef.current.delete(id);
+        continue;
+      }
+      const pos = ref.object3D.position;
+      const untouched =
+        Math.abs(pos.x - e.px) < 1e-9 &&
+        Math.abs(pos.y - e.py) < 1e-9 &&
+        Math.abs(pos.z - e.pz) < 1e-9;
+      if (untouched) {
+        pos.x -= e.x;
+        pos.y -= e.y;
+        pos.z -= e.z;
+        if (e.a !== 0) {
+          ref.object3D.rotation.z -= e.a;
+        }
+        if (!isIdentityQuat(e.q)) {
+          const inv = quatInvert(e.q);
+          const cur = ref.object3D.quaternion;
+          const r = quatMultiply(inv, { x: cur.x, y: cur.y, z: cur.z, w: cur.w });
+          cur.set(r.x, r.y, r.z, r.w);
+        }
+      }
+      // Fingerprint mismatch: something rewrote the transform — drop the record.
+    }
+    appliedErrorsRef.current.clear();
+  }, []);
+
+  // Stable input setter — delegates to PredictionSync; no-op in events/snapshot modes.
+  const setInput = useCallback((input: PlayerInput) => {
+    predictionSyncRef.current?.setInput(input);
+  }, []);
 
   // ── Setup & teardown sync engines ──
   useEffect(() => {
@@ -284,17 +384,34 @@ export function useMultiplayer(
     }
 
     if (mode === "prediction") {
+      // World driver: full-world capture/apply for forward sim and rollback.
+      // Closures read live refs so the driver tracks registry and 2D detection.
+      const driver: PredictionWorldDriver = {
+        captureState: () =>
+          buildEntityMap(actorRegistry.current.getNetworked(), is2DRef.current ?? true),
+        applyState: (entities) => {
+          const is2D = is2DRef.current ?? true;
+          for (const state of entities) {
+            if (state.c && (state.c as Record<string, unknown>).__removed) continue;
+            const ref = actorRegistry.current.get(state.id);
+            if (!ref) continue;
+            if (is2D) applyStateHard2D(ref, state as EntityState2D);
+            else applyStateHard3D(ref, state as EntityState3D);
+          }
+        },
+        ...(options.stepWorld ? { stepWorld: options.stepWorld } : {}),
+      };
+
       predictionSyncRef.current = new PredictionSync(
         transport,
-        networkManager.codec,
         networkManager.tickKeeper,
+        snapshotSyncRef.current!,
         options.prediction,
       );
-
-      // Wire up the physics step callback if provided
       if (options.onPhysicsStep) {
         predictionSyncRef.current.setPhysicsStep(options.onPhysicsStep);
       }
+      predictionSyncRef.current.setWorldDriver(driver);
     }
 
     wasHostRef.current = networkManager.isHost;
@@ -332,9 +449,10 @@ export function useMultiplayer(
       snapshotSyncRef.current = null;
       predictionSyncRef.current = null;
       networkSimulatorRef.current = null;
+      appliedErrorsRef.current.clear();
       setIsActive(false);
     };
-  }, [networkManager, mode, buildSnapshotOpts, options.prediction, options.onPhysicsStep, options.debug]);
+  }, [networkManager, mode, buildSnapshotOpts, options.prediction, options.onPhysicsStep, options.stepWorld, options.debug]);
 
   // ── Sync network quality from manager ──
   useEffect(() => {
@@ -365,6 +483,14 @@ export function useMultiplayer(
     // Events-only mode: no per-frame state sync needed
     if (mode === "events") return;
 
+    // Prediction: undo render-only error offsets, then apply any pending server
+    // snapshot (full-world rollback). MUST run before tickKeeper.update because
+    // beginFrame may snap the local tick.
+    if (mode === "prediction" && predictionSyncRef.current) {
+      undoAppliedErrorOffsets();
+      predictionSyncRef.current.beginFrame();
+    }
+
     // Advance tick accumulator
     const ticksThisFrame = tickKeeper.update(delta);
 
@@ -372,38 +498,74 @@ export function useMultiplayer(
     for (let i = 0; i < ticksThisFrame; i++) {
       const currentTick = tickKeeper.tick - (ticksThisFrame - 1 - i);
 
-      if (isHost) {
+      if (mode === "prediction" && predictionSyncRef.current) {
+        // Host AND client: full forward simulation of every networked entity
+        predictionSyncRef.current.tick(currentTick);
+
+        if (isHost) {
+          const entities = buildEntityMap(actorRegistry.current.getNetworked(), is2D);
+          snapshotSyncRef.current?.hostTick(
+            currentTick,
+            entities,
+            tickKeeper.tickDelta,
+            predictionSyncRef.current.getLocalInput(currentTick),
+          );
+        }
+      } else if (mode === "snapshot" && isHost) {
         // Host: read actor state and broadcast
         const networked = actorRegistry.current.getNetworked();
         const entities = buildEntityMap(networked, is2D);
-
-        if (mode === "snapshot" || mode === "prediction") {
-          snapshotSyncRef.current?.hostTick(currentTick, entities, tickKeeper.tickDelta);
-        }
-
-        if (mode === "prediction") {
-          predictionSyncRef.current?.hostTick(currentTick, entities, tickKeeper.tickDelta);
-        }
-      } else {
-        // Client in prediction mode: run client tick
-        if (mode === "prediction" && predictionSyncRef.current) {
-          predictionSyncRef.current.clientTick(currentTick);
-        }
+        snapshotSyncRef.current?.hostTick(currentTick, entities, tickKeeper.tickDelta);
       }
     }
 
     // ── Render-phase interpolation / smoothing (runs every frame) ──
-    if (!isHost) {
-      if (mode === "snapshot" && snapshotSyncRef.current) {
-        // Client interpolation: use performance.now() as render time
-        const renderTime = performance.now();
-        const interpolated = snapshotSyncRef.current.clientInterpolate(renderTime);
-        applyStatesToActors(interpolated, actorRegistry.current, is2D);
-      } else if (mode === "prediction" && predictionSyncRef.current) {
-        // Apply error smoothing on top of predicted state
-        const predicted = predictionSyncRef.current.predictedState;
-        const smoothed = predictionSyncRef.current.applyErrorSmoothing(predicted);
-        applyStatesToActors(smoothed, actorRegistry.current, is2D);
+    if (!isHost && mode === "snapshot" && snapshotSyncRef.current) {
+      // Client interpolation: use performance.now() as render time
+      const renderTime = performance.now();
+      const interpolated = snapshotSyncRef.current.clientInterpolate(renderTime);
+      applyStatesToActors(interpolated, actorRegistry.current, is2D);
+    }
+
+    // Prediction: apply decayed error offsets to rendered transforms only.
+    // Rigid bodies are never touched here — physics owns transforms via the
+    // tick loop; offsets are an Object3D-only render adjustment. The host's
+    // offset map is simply empty.
+    if (mode === "prediction" && predictionSyncRef.current) {
+      const offsets = predictionSyncRef.current.getRenderErrorOffsets();
+      for (const [id, off] of offsets) {
+        const ref = actorRegistry.current.get(id);
+        if (!ref) continue;
+
+        const pos = ref.object3D.position;
+        pos.x += off.x;
+        pos.y += off.y;
+        if (!is2D) pos.z += off.z;
+
+        let appliedA = 0;
+        let appliedQ: Quat = IDENTITY_QUAT;
+        if (is2D) {
+          ref.object3D.rotation.z += off.a;
+          appliedA = off.a;
+        } else {
+          appliedQ = { x: off.qx, y: off.qy, z: off.qz, w: off.qw };
+          if (!isIdentityQuat(appliedQ)) {
+            const cur = ref.object3D.quaternion;
+            const r = quatMultiply(appliedQ, { x: cur.x, y: cur.y, z: cur.z, w: cur.w });
+            cur.set(r.x, r.y, r.z, r.w);
+          }
+        }
+
+        appliedErrorsRef.current.set(id, {
+          x: off.x,
+          y: off.y,
+          z: is2D ? 0 : off.z,
+          a: appliedA,
+          q: appliedQ,
+          px: pos.x,
+          py: pos.y,
+          pz: pos.z,
+        });
       }
     }
 
@@ -427,5 +589,6 @@ export function useMultiplayer(
     serverTick,
     drift,
     syncEngine: mode,
+    setInput,
   };
 }
