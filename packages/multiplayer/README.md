@@ -89,6 +89,16 @@ Defaults to public STUN. Add a TURN relay so peers behind restrictive NATs or fi
 
 TURN is only used when a direct connection fails. For same-network testing, STUN alone is enough.
 
+## Connection reliability
+
+The WebRTC mesh self-heals while peers are connecting — no configuration required. Each link has a single deterministic initiator (the peer with the lower id); if a pair hasn't reached `connected` shortly after the first offer, the initiator automatically re-sends it with an ICE restart, a few times over roughly 20 seconds, until the link comes up. This transparently recovers the transient failures of serverless signaling:
+
+- an offer, answer, or ICE candidate dropped in transit;
+- ICE candidates that arrive before the peer is ready (buffered, not discarded);
+- slow STUN candidate gathering on a cold network.
+
+Every pair in the mesh establishes independently and recovers on its own, so a hiccup on one link no longer leaves two players unable to see each other — the rest of the room is unaffected and the stalled pair re-handshakes itself. This makes **STUN-only** deployments reliable in practice. A TURN relay is still required only for pairs that genuinely can't traverse each other's NAT (e.g. two symmetric/CGNAT endpoints) — STUN cannot relay those no matter how many times the handshake retries.
+
 ## Sync modes
 
 `useMultiplayer({ mode })` selects how world state is replicated:

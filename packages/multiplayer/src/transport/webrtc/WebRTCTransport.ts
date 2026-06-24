@@ -14,6 +14,17 @@ import { PeerConnection } from "./peer";
 
 const ROOM_CONTROL_CHANNEL = 'carver:room-control';
 
+/**
+ * STUN-only reliability: how long to wait for a pair to reach 'connected'
+ * before the deterministic initiator re-sends its offer, and how many times.
+ * A handshake that loses its offer/answer/candidate in signaling — or whose
+ * STUN server-reflexive candidates gather slowly — otherwise sits in
+ * 'connecting' forever: it never reaches 'failed', so the drop handler never
+ * fires and the pair stays mutually invisible for the whole session.
+ */
+const CONNECT_RETRY_DELAY_MS = 4000;
+const CONNECT_RETRY_MAX_ATTEMPTS = 5;
+
 interface ChannelState<T> {
   name: string;
   options: ChannelOptions;
@@ -244,6 +255,10 @@ export class WebRTCTransport implements CarverTransport {
     for (const peer of this._peers.values()) peer.close();
     this._peers.clear();
     this._peerSet.clear();
+    // Cancel any in-flight establishment re-offer timers
+    for (const t of this._connectRetryTimers.values()) clearTimeout(t);
+    this._connectRetryTimers.clear();
+    this._connectAttempts.clear();
     this._channels.clear();
     this._rateLimitCounters.clear();
     this._playerMap.clear();
@@ -521,11 +536,16 @@ export class WebRTCTransport implements CarverTransport {
 
   /** Grace timers for transient ICE 'disconnected' states */
   private _disconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Re-offer timers for pairs still establishing (STUN-only reliability) */
+  private _connectRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Re-offer attempt counts, keyed by peerId */
+  private _connectAttempts = new Map<string, number>();
   /** Sends queued while a data channel is not yet open: key = peerId channel */
   private _pendingSends = new Map<string, (string | ArrayBuffer | Uint8Array)[]>();
 
-  private _connectToPeer(peerId: string): void {
-    if (this._peers.has(peerId)) return;
+  private _connectToPeer(peerId: string): PeerConnection {
+    const existing = this._peers.get(peerId);
+    if (existing) return existing;
 
     const peer = new PeerConnection(peerId, this._iceConfig, {
       onStateChange: (state) => {
@@ -536,6 +556,8 @@ export class WebRTCTransport implements CarverTransport {
             clearTimeout(timer);
             this._disconnectTimers.delete(peerId);
           }
+          // Pair established — stop the establishment re-offer loop.
+          this._clearConnectRetry(peerId);
         }
         if (state === 'connected' && this._isHost && this._room) {
           // Send full state sync to the new peer
@@ -570,8 +592,67 @@ export class WebRTCTransport implements CarverTransport {
       }
       peer.createOffer().then((offer) => {
         this._strategy.signal(peerId, { type: 'offer', sdp: offer });
-      });
+      }).catch(() => { /* the connect-retry loop will re-attempt */ });
+      // STUN-only reliability net: re-offer (with ICE restart) if this pair
+      // doesn't reach 'connected' — recovers a lost offer/answer/candidate or
+      // a slow STUN gather without waiting for an ICE 'failed' that never comes
+      // for a handshake that never started.
+      this._armConnectRetry(peerId);
     }
+
+    return peer;
+  }
+
+  /**
+   * Schedule the initiator's establishment re-offers. Only the deterministic
+   * initiator (lower peerId) drives this, mirroring initial-offer ownership.
+   * Each tick: if the peer still isn't 'connected', re-create and re-send the
+   * offer with `iceRestart` (a full offer, so it also recovers a lost initial
+   * offer) and reschedule, up to CONNECT_RETRY_MAX_ATTEMPTS. The drop handler
+   * owns 'failed'/'disconnected' recovery, so back off while it is active.
+   */
+  private _armConnectRetry(peerId: string): void {
+    if (this._peerId >= peerId) return; // only the initiator re-offers
+    if (this._connectRetryTimers.has(peerId)) return;
+
+    const tick = (): void => {
+      this._connectRetryTimers.delete(peerId);
+      const peer = this._peers.get(peerId);
+      if (!peer || peer.state === 'connected') {
+        this._connectAttempts.delete(peerId);
+        return;
+      }
+      // Let the failed/disconnected self-heal own recovery while it runs.
+      if (this._disconnectTimers.has(peerId)) {
+        this._connectRetryTimers.set(peerId, setTimeout(tick, CONNECT_RETRY_DELAY_MS));
+        return;
+      }
+      const attempts = (this._connectAttempts.get(peerId) ?? 0) + 1;
+      if (attempts > CONNECT_RETRY_MAX_ATTEMPTS) {
+        this._connectAttempts.delete(peerId);
+        return; // give up: pair is unreachable on STUN (no TURN to relay)
+      }
+      this._connectAttempts.set(peerId, attempts);
+
+      peer.createOffer({ iceRestart: true })
+        .then((offer) => {
+          // Bail if the peer was replaced/removed or connected mid-create.
+          if (this._peers.get(peerId) === peer && peer.state !== 'connected') {
+            this._strategy.signal(peerId, { type: 'offer', sdp: offer });
+          }
+        })
+        .catch(() => { /* next tick retries */ });
+
+      this._connectRetryTimers.set(peerId, setTimeout(tick, CONNECT_RETRY_DELAY_MS));
+    };
+
+    this._connectRetryTimers.set(peerId, setTimeout(tick, CONNECT_RETRY_DELAY_MS));
+  }
+
+  private _clearConnectRetry(peerId: string): void {
+    const timer = this._connectRetryTimers.get(peerId);
+    if (timer) { clearTimeout(timer); this._connectRetryTimers.delete(peerId); }
+    this._connectAttempts.delete(peerId);
   }
 
   private async _handleSignal(peerId: string, data: unknown): Promise<void> {
@@ -585,15 +666,18 @@ export class WebRTCTransport implements CarverTransport {
       let peer = this._peers.get(peerId);
 
       if (signal.type === 'offer') {
-        if (!peer) {
-          this._connectToPeer(peerId);
-          peer = this._peers.get(peerId)!;
-        }
+        if (!peer) peer = this._connectToPeer(peerId);
         const answer = await peer.handleOffer(signal.sdp!);
         this._strategy.signal(peerId, { type: 'answer', sdp: answer });
-      } else if (signal.type === 'answer' && peer) {
-        await peer.handleAnswer(signal.sdp!);
-      } else if (signal.type === 'ice-candidate' && peer) {
+      } else if (signal.type === 'answer') {
+        // An answer only arrives in response to an offer we already sent, so the
+        // peer must exist. A stray answer with no peer is meaningless — ignore.
+        if (peer) await peer.handleAnswer(signal.sdp!);
+      } else if (signal.type === 'ice-candidate') {
+        // Create the peer if a candidate arrives before discovery/offer so it is
+        // buffered (PeerConnection) instead of dropped. The buffer flushes once
+        // the remote description is set.
+        if (!peer) peer = this._connectToPeer(peerId);
         await peer.addIceCandidate(signal.candidate!);
       }
     } catch (err) {
@@ -732,6 +816,7 @@ export class WebRTCTransport implements CarverTransport {
     this._rateLimitCounters.delete(peerId);
     const timer = this._disconnectTimers.get(peerId);
     if (timer) { clearTimeout(timer); this._disconnectTimers.delete(peerId); }
+    this._clearConnectRetry(peerId);
     for (const key of [...this._pendingSends.keys()]) {
       if (key.startsWith(peerId + ' ')) this._pendingSends.delete(key);
     }

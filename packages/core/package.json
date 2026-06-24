@@ -1,6 +1,6 @@
 {
   "name": "@carverjs/core",
-  "version": "0.0.3",
+  "version": "1.0.0",
   "description": "A batteries-included web game engine — React + Three.js components, hooks, ECS-lite systems, tweening, particles, and audio.",
   "homepage": "https://docs.carverjs.dev",
   "repository": {

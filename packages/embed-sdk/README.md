@@ -29,6 +29,10 @@ carver.requestFullscreen();             // call from a click / keypress handler
 carver.error("asset-load-failed", "texture atlas 404");
 carver.exit();                          // game over; hand control back to the shell
 
+// prove which signed-in player this is, to YOUR OWN backend
+const id = await carver.getIdentity();
+if (id.ok) saveToMyBackend(id.token, id.userId);
+
 // future shell -> game hints (pause / resume, etc.)
 const unsubscribe = carver.subscribe((msg) => {
   if (msg.type === "carver:pause") {
@@ -50,9 +54,60 @@ Every call is a **safe no-op** outside an iframe (for example when you open your
 | `score(value, label?)` | Score reporting (finite numbers only). |
 | `requestFullscreen()` | Ask the shell to go fullscreen (needs a user gesture). |
 | `exit()` | Game finished. |
+| `getIdentity()` | `Promise` — a signed token proving which signed-in player this is, for your own backend. See below. |
 | `subscribe(handler)` | Shell to game messages; returns an unsubscribe function. |
 | `configure({ targetOrigin?, parentOrigin? })` | Optional origin pinning. |
 | `isEmbedded()` | `true` when running inside the marketplace shell. |
+
+## Player identity (`getIdentity`)
+
+If your game keeps player data on **your own backend**, `getIdentity()`
+lets that backend know which marketplace user it's talking to — without
+the game ever handling a marketplace credential.
+
+```ts
+const id = await carver.getIdentity();
+if (id.ok) {
+  // id.token     — short-lived signed JWT (RS256)
+  // id.userId    — stable, opaque id for THIS player in THIS game
+  // id.expiresAt — Unix epoch (ms)
+  await fetch("https://my-game-backend.com/save", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${id.token}` },
+    body: JSON.stringify({ progress: 12 }),
+  });
+} else if (id.reason === "signin-required") {
+  // the player isn't signed in to the marketplace — prompt them
+}
+```
+
+It always resolves (never throws). On failure you get
+`{ ok: false, reason }` where `reason` is one of `"signin-required"`,
+`"not-embedded"`, `"timeout"`, `"rate-limited"`, or `"error"`.
+
+**Verify the token on your server** — never trust it in the browser.
+It's a standard RS256 JWT; verify it against the marketplace JWKS and
+check the claims:
+
+```ts
+// any backend / language with a JWT library — example uses `jose`
+import { jwtVerify, createRemoteJWKSet } from "jose";
+
+const JWKS = createRemoteJWKSet(
+  new URL("https://www.carverjs.dev/.well-known/jwks.json"),
+);
+
+const { payload } = await jwtVerify(token, JWKS, {
+  issuer: "https://www.carverjs.dev",
+  audience: "<your-game-id>", // also present as payload.gameId
+});
+// payload.sub === id.userId — your stable key for this player
+```
+
+`userId` (the token's `sub`) is **per-game**: the same person gets a
+different id in a different game, so it can't be used to track players
+across the marketplace. It requires a **real signed-in account** —
+anonymous play sessions resolve `signin-required`.
 
 ## Security
 

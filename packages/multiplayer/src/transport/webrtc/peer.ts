@@ -86,6 +86,16 @@ export class PeerConnection {
   async createOffer(options?: RTCOfferOptions): Promise<RTCSessionDescriptionInit> {
     // `options` carries `{ iceRestart: true }` when renegotiating a dropped
     // connection so a fresh ICE ufrag/pwd is generated (ICE restart).
+    if (options?.iceRestart) {
+      // The prior remote description belongs to the OLD ICE generation. Reset
+      // the buffering flag so candidates for the NEW generation are buffered
+      // until the fresh answer (remote description) is applied, instead of being
+      // added against the stale description and silently rejected. handleAnswer
+      // sets it true again and flushes. (Only our bookkeeping flag is touched;
+      // the live RTCPeerConnection keeps using its current description until the
+      // new answer lands, so an existing connection is not disrupted.)
+      this._remoteDescriptionSet = false;
+    }
     const offer = await this._connection.createOffer(options);
     await this._connection.setLocalDescription(offer);
     return offer;
