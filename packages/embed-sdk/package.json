@@ -38,6 +38,9 @@
   ],
   "author": "Het Dave",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "tsup": "^8.5.1",
     "typescript": "^5.9.3"

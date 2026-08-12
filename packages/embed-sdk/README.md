@@ -8,7 +8,7 @@ Talk to the CarverJS marketplace shell from inside your game. Dependency-free, ~
 
 Games on the marketplace run inside a sandboxed `<iframe>` on their own origin. The shell (the play page) listens for a small set of typed `postMessage` signals — this SDK sends them so you never hand-roll `postMessage` shapes, and it stays in lockstep with the shell's validator.
 
-> **Beta:** CarverJS is under active development. APIs may change between minor versions until 1.0.
+> **Stable:** `@carverjs/embed-sdk` 1.0 is released. It is versioned independently of the engine and follows [semantic versioning](https://semver.org/) — breaking changes ship only in a new major version.
 
 ## Install
 

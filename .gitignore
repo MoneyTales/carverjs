@@ -2,7 +2,8 @@ node_modules
 dist
 build
 *.local
-
+CarverJS-Quick-Start-Guide.pdf
+QUICK_START.md
 # Build caches
 .turbo
 .docusaurus

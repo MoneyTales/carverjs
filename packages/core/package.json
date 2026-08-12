@@ -81,6 +81,9 @@
   ],
   "author": "Het Dave",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "three-stdlib": "^2.36.1"
   },

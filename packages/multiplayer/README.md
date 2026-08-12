@@ -6,7 +6,7 @@
 
 Serverless peer-to-peer multiplayer for [CarverJS](https://www.npmjs.com/package/@carverjs/core) games. A WebRTC data-channel mesh with pluggable signaling (MQTT or Firebase), lobbies, host authority, and three sync engines — **no game server required**.
 
-> **Beta:** CarverJS is under active development. APIs may change between minor versions until 1.0.
+> **Stable:** `@carverjs/multiplayer` 1.0 is released. The public API follows [semantic versioning](https://semver.org/) — breaking changes ship only in a new major version.
 
 ## Install
 

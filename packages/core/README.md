@@ -6,7 +6,7 @@
 
 The CarverJS game engine — build declarative 2D and 3D games as composable React components, on top of [Three.js](https://threejs.org/) and [React Three Fiber](https://docs.pmnd.rs/react-three-fiber).
 
-> **Beta:** CarverJS is under active development. APIs may change between minor versions until 1.0.
+> **Stable:** `@carverjs/core` 1.0 is released. The public API follows [semantic versioning](https://semver.org/) — breaking changes ship only in a new major version.
 
 ## Install
 

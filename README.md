@@ -1,8 +1,8 @@
-# CarverJS [BETA]
+# CarverJS
 
 A declarative React game engine built on [Three.js](https://threejs.org/) and [React Three Fiber](https://docs.pmnd.rs/react-three-fiber). Build 2D and 3D multiplayer games with simple, composable React components.
 
-> **Beta:** CarverJS is under active development. APIs may change between minor versions until 1.0.
+> **Stable:** CarverJS 1.0 is released. The public API follows [semantic versioning](https://semver.org/) -- breaking changes ship only in a new major version.
 
 ## Packages
 
@@ -10,6 +10,7 @@ A declarative React game engine built on [Three.js](https://threejs.org/) and [R
 |---------|-------------|-----|
 | `@carverjs/core` | Game engine -- components, hooks, systems, store | [![npm](https://img.shields.io/npm/v/@carverjs/core)](https://www.npmjs.com/package/@carverjs/core) |
 | `@carverjs/multiplayer` | P2P multiplayer -- WebRTC, signaling strategies, sync | [![npm](https://img.shields.io/npm/v/@carverjs/multiplayer)](https://www.npmjs.com/package/@carverjs/multiplayer) |
+| `@carverjs/embed-sdk` | Typed `postMessage` bridge for games embedded in the marketplace | [![npm](https://img.shields.io/npm/v/@carverjs/embed-sdk)](https://www.npmjs.com/package/@carverjs/embed-sdk) |
 
 ## Features
 
@@ -134,6 +135,7 @@ carverjs/
   packages/
     core/             @carverjs/core -- game engine
     multiplayer/      @carverjs/multiplayer -- P2P networking
+    embed-sdk/        @carverjs/embed-sdk -- marketplace embed bridge
   examples/
     basic-2d/         Minimal 2D demo
     basic-3d/         Minimal 3D demo

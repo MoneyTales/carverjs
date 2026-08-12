@@ -11,7 +11,18 @@
   "bugs": {
     "url": "https://github.com/MoneyTales/carverjs/issues"
   },
-  "keywords": [],
+  "keywords": [
+    "multiplayer",
+    "webrtc",
+    "p2p",
+    "peer-to-peer",
+    "networking",
+    "state-sync",
+    "game-engine",
+    "carverjs",
+    "react",
+    "gamedev"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -66,12 +77,15 @@
   },
   "author": "Het Dave",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "msgpackr": "^1.11.0",
     "mqtt": "^5.10.0"
   },
   "peerDependencies": {
-    "@carverjs/core": ">=0.0.1",
+    "@carverjs/core": "^1.0.0",
     "@react-three/fiber": ">=9.0.0",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0",

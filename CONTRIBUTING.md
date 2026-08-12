@@ -1,6 +1,6 @@
 # Contributing to CarverJS
 
-Thanks for your interest in contributing. CarverJS is in early beta and we welcome contributions of all kinds -- bug reports, feature requests, documentation improvements, and code.
+Thanks for your interest in contributing. CarverJS is stable at 1.0 and we welcome contributions of all kinds -- bug reports, feature requests, documentation improvements, and code.
 
 ## Getting Started
 
@@ -28,7 +28,7 @@ pnpm --filter @carverjs/example-multiplayer-2d dev
 
 1. Fork the repo and create a branch from `main`.
 2. `pnpm install` at the root.
-3. Make your changes in `packages/core/` or `packages/multiplayer/`.
+3. Make your changes in `packages/core/`, `packages/multiplayer/`, or `packages/embed-sdk/`.
 4. Run `pnpm build` to verify everything compiles.
 5. Test your changes against the examples.
 6. Open a pull request with a clear description.
@@ -39,6 +39,7 @@ pnpm --filter @carverjs/example-multiplayer-2d dev
 packages/
   core/          # @carverjs/core -- game engine components, hooks, systems
   multiplayer/   # @carverjs/multiplayer -- P2P networking (WebRTC + signaling strategies)
+  embed-sdk/     # @carverjs/embed-sdk -- typed postMessage bridge for embedded games
 examples/
   basic-2d/      # Minimal 2D demo
   basic-3d/      # Minimal 3D demo
