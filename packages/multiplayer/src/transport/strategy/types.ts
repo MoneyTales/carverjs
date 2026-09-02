@@ -37,6 +37,44 @@ export interface FirebaseStrategyConfig {
   databaseURL: string;
   /** Existing Firebase app instance (optional -- avoids double-init) */
   firebaseApp?: unknown;
+
+  /**
+   * Supply a Firebase Auth **custom token** to sign in with before any RTDB
+   * traffic. Omit it and the strategy connects anonymously: no token is
+   * fetched, no sign-in happens, and `firebase/auth` is never even imported.
+   *
+   * Called once during `init()`, and again for a single re-auth cycle when a
+   * write or listener comes back `permission_denied` (a revoked session or an
+   * expired token). Return a FRESH token each call; do not cache one that the
+   * server has already handed out for a finished session.
+   *
+   * Custom tokens are minted by your backend, never in the browser. See the
+   * README's "Authenticated signaling" section for the claims contract.
+   */
+  authTokenProvider?: () => Promise<string>;
+
+  /**
+   * Firebase Web API key. **Required whenever `authTokenProvider` is set and
+   * no `firebaseApp` is supplied** -- Firebase Auth cannot sign in on an app
+   * initialized with `databaseURL` alone, so a missing key fails `init()` with
+   * a clear error rather than a confusing Auth internal one. Not needed when
+   * you pass your own already-configured `firebaseApp`.
+   *
+   * The Web API key is a PUBLIC project identifier, not a secret (it ships in
+   * every Firebase web app's bundle; access control is the job of the RTDB
+   * security rules). It must still arrive through this config -- from your
+   * shell, env, or server -- and never be hardcoded in engine or game source.
+   */
+  apiKey?: string;
+
+  /**
+   * Called when authentication fails in a way the strategy cannot recover
+   * from on its own: the provider or sign-in failing during `init()`, a
+   * re-auth cycle failing, or a signaling listener being cancelled by the
+   * server. A cancelled listener is NOT re-subscribed automatically -- the
+   * application should rejoin the room in response.
+   */
+  onAuthError?: (error: Error) => void;
 }
 
 export type StrategyConfig = MqttStrategyConfig | FirebaseStrategyConfig;

@@ -18,6 +18,8 @@ npm install firebase
 
 Peer dependencies: `@carverjs/core`, `@react-three/fiber`, `react`, `react-dom`. `firebase` is an optional peer, needed only when you choose the Firebase strategy.
 
+Releases are published to npm manually by the maintainer — this repo does not auto-publish.
+
 ## How it works
 
 Signaling (MQTT or Firebase) is used only to introduce peers and relay SDP/ICE. Once the WebRTC connection is established, **all game data flows directly peer-to-peer** over data channels — the signaling backend never sees gameplay traffic. One peer acts as the authoritative host; host migrates automatically if it leaves.
@@ -72,6 +74,43 @@ function Lobby() {
   strategy={{ type: "firebase", databaseURL: "https://your-project.firebaseio.com" }}
 >
 ```
+
+## Authenticated signaling (Firebase)
+
+Auth is entirely optional and additive. With no `authTokenProvider` there is no token fetch and no sign-in, and `firebase/auth` is never imported — so the anonymous bundle does not grow and existing code needs no change.
+
+```tsx
+<MultiplayerProvider
+  appId="my-game"
+  strategy={{
+    type: "firebase",
+    databaseURL: "https://your-project.firebaseio.com",
+    apiKey: "AIza...", // public project identifier, not a secret
+    authTokenProvider: async () => {
+      // fetch a fresh custom token from your own backend on every call
+      const res = await fetch("/api/rtdb-token");
+      const { token } = await res.json();
+      return token;
+    },
+    onAuthError: (error) => {
+      console.error("signaling auth failed", error);
+      // treat as fatal for the current room — rejoin to recover
+    },
+  }}
+>
+```
+
+Never hardcode a token or embed a service account in the browser — always fetch from your backend.
+
+`apiKey` is a public project identifier, not a secret — it ships in every Firebase web bundle, and access control is the job of your security rules, not the key. It's still required whenever `authTokenProvider` is set and you don't supply your own `firebaseApp` (Auth cannot sign in on an app initialized with `databaseURL` alone), and it must arrive through config, never hardcoded in game source.
+
+**Claims contract.** Your backend mints a Firebase Auth custom token with `uid` set to an opaque per-player-session id (no PII) and custom claims `{ roomId, ns }` — both required. Your security rules bind reads and writes to those two claims; any other claims (e.g. a role) are informational and ignored by the rules. Custom tokens expire in 1 hour by SDK design — the strategy calls `authTokenProvider` again when it needs to re-auth, so your provider must return a new token on every call, not a cached one. Note that the *session* does not expire with the token: `signInWithCustomToken` exchanges it for a refresh token that the SDK renews indefinitely with the same claims. If access must end when the game session does, revoke it server-side (Admin SDK `revokeRefreshTokens(uid)`) or mint a time-bound claim your rules check — your security rules cannot see this on their own.
+
+**Failure and recovery.** On init, the strategy retries `authTokenProvider` + sign-in up to 4 times total (250ms, 1s, 4s backoff) before giving up and calling `onAuthError`. Once connected, a `permission_denied` on the presence re-arm, or a cancelled RTDB listener, triggers exactly one re-auth cycle for that connection. A cancelled listener is *not* automatically re-subscribed — `onAuthError` is your app's signal to rejoin the room.
+
+The strategy also watches its own presence node and rewrites it if it vanishes. Any backend whose rules grant write access at room scope lets one player delete another's presence entry, which would otherwise evict that player from everyone's peer list with no error and no reconnect to recover from.
+
+**Security rules.** The strategy writes under `${appId}/__carver__/...` (a slash-containing `appId` simply nests further). Bind each room's subtree to `auth.token.roomId` and `auth.token.ns` from the custom token claims above. This README keeps the rule shape generic — write the actual ruleset alongside your own backend, not in this package.
 
 ## STUN / TURN
 

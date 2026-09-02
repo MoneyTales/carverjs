@@ -1,6 +1,6 @@
 {
   "name": "@carverjs/multiplayer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Serverless P2P multiplayer for CarverJS games — WebRTC mesh, lobbies, host authority, and state sync over MQTT or Firebase signaling.",
   "homepage": "https://docs.carverjs.dev",
   "repository": {
