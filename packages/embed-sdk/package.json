@@ -1,6 +1,6 @@
 {
   "name": "@carverjs/embed-sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Tiny SDK for games embedded in the CarverJS marketplace — typed postMessage to the parent shell without raw postMessage calls",
   "homepage": "https://docs.carverjs.dev",
   "repository": {
@@ -27,7 +27,9 @@
   ],
   "scripts": {
     "build": "tsup",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "carverjs",
@@ -42,7 +44,9 @@
     "access": "public"
   },
   "devDependencies": {
+    "jsdom": "^26.1.0",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.0"
   }
 }
